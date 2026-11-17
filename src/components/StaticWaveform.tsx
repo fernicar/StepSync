@@ -220,6 +220,9 @@ export function StaticWaveform({
         }
       }
 
+      const rootPx = parseFloat(document.documentElement.style.fontSize) || 20;
+      const scaleF = rootPx / 16;
+
       if (bpm > 0) {
         const beatDur = 60 / bpm;
         const beatPx = beatDur * zoomRef.current;
@@ -227,7 +230,7 @@ export function StaticWaveform({
         const firstBeat = Math.ceil((viewStart - st) / beatDur);
         const lastBeat = Math.floor((viewEnd - st) / beatDur);
 
-        ctx.font = '12px monospace';
+        ctx.font = `${Math.round(11 * scaleF)}px monospace`;
         ctx.lineJoin = 'round';
         for (let i = firstBeat; i <= lastBeat; i++) {
           const t = st + i * beatDur;
@@ -262,7 +265,7 @@ export function StaticWaveform({
           pink: 'rgba(236, 72, 153, 0.92)',
           violet: 'rgba(167, 139, 250, 0.92)',
         };
-        ctx.font = 'bold 10px monospace';
+        ctx.font = `bold ${Math.round(9.5 * scaleF)}px monospace`;
         const isManualAdd = (ev: DrumEvent) =>
           manualEdits.additions.some(
             (a) => a.band === ev.band && a.lane === ev.lane && Math.abs(a.time - ev.time) <= 0.02
@@ -341,7 +344,7 @@ export function StaticWaveform({
           ctx.strokeStyle = '#ef4444';
           ctx.lineWidth = 2;
           ctx.strokeRect(x - 5, strip.yTop - 3, 11, strip.barH + 6);
-          ctx.font = 'bold 10px monospace';
+          ctx.font = `bold ${Math.round(9.5 * scaleF)}px monospace`;
           ctx.fillStyle = '#fca5a5';
           ctx.fillText(`-Del ${ev.badge || 'Hit'}`, Math.min(width - 54, x + 8), strip.yTop + 10);
           ctx.restore();
@@ -361,7 +364,7 @@ export function StaticWaveform({
           ctx.globalAlpha = 0.72;
           ctx.fillStyle = col;
           ctx.fillRect(x - 1.5, strip.yTop, 3, strip.barH);
-          ctx.font = 'bold 10px monospace';
+          ctx.font = `bold ${Math.round(9.5 * scaleF)}px monospace`;
           ctx.fillText(`+${brush.badge}`, Math.min(width - 28, x + 4), strip.textY);
           ctx.restore();
         }
@@ -384,7 +387,7 @@ export function StaticWaveform({
           ctx.lineTo(x, 14);
           ctx.fill();
 
-          ctx.font = 'bold 12px monospace';
+          ctx.font = `bold ${Math.round(11 * scaleF)}px monospace`;
           const textWidth = ctx.measureText(label).width;
           const textX = x - textWidth / 2;
           ctx.lineWidth = 3;
@@ -406,7 +409,7 @@ export function StaticWaveform({
         const handleXs = [st, half, end].map((t) => (t - viewStart) * zoomRef.current);
 
         ctx.save();
-        ctx.font = 'bold 11px monospace';
+        ctx.font = `bold ${Math.round(10 * scaleF)}px monospace`;
         ctx.lineJoin = 'round';
 
         for (let idx = 0; idx < sorted.length; idx++) {
@@ -666,20 +669,19 @@ export function StaticWaveform({
   const totalEditsCount = manualEdits.suppressions.length + manualEdits.additions.length;
 
   const brushBtnClass = (rule: DrumLaneRule, active: boolean) => {
-    if (!active) return 'bg-gray-900 border-gray-800 text-gray-400 hover:text-gray-200';
-    if (rule.color === 'amber') return 'bg-amber-500/20 border-amber-500/60 text-amber-300 font-semibold';
-    if (rule.color === 'emerald') return 'bg-emerald-500/20 border-emerald-500/60 text-emerald-300 font-semibold';
-    if (rule.color === 'sky') return 'bg-sky-500/20 border-sky-500/60 text-sky-300 font-semibold';
-    if (rule.color === 'violet') return 'bg-violet-500/20 border-violet-500/60 text-violet-300 font-semibold';
-    return 'bg-pink-500/20 border-pink-500/60 text-pink-300 font-semibold';
+    if (!active) return 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]';
+    if (rule.color === 'amber') return 'bg-amber-500/20 text-amber-300 font-semibold';
+    if (rule.color === 'emerald') return 'bg-emerald-500/20 text-emerald-300 font-semibold';
+    if (rule.color === 'sky') return 'bg-sky-500/20 text-sky-300 font-semibold';
+    if (rule.color === 'violet') return 'bg-violet-500/20 text-violet-300 font-semibold';
+    return 'bg-pink-500/20 text-pink-300 font-semibold';
   };
 
   return (
-    <div className="flex flex-col space-y-2 mt-2">
-      <div className="flex flex-wrap justify-between items-center gap-2 text-xs text-gray-400 px-1">
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <span className="text-gray-300 font-medium">Static Grid</span>
-          <div className="inline-flex p-0.5 bg-gray-950 border border-gray-800 rounded-md">
+    <div className="flex flex-col space-y-1">
+      <div className="flex flex-wrap justify-between items-center gap-2 text-xs text-gray-400">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <div className="inline-flex items-center gap-0.5">
             <button
               type="button"
               onClick={() => {
@@ -687,10 +689,10 @@ export function StaticWaveform({
                 hoverStateRef.current = null;
               }}
               className={cn(
-                'px-2 py-0.5 text-xs rounded transition-colors whitespace-nowrap shrink-0',
+                'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0',
                 editMode === 'pan'
-                  ? 'bg-gray-800 text-white font-medium'
-                  : 'text-gray-400 hover:text-gray-200'
+                  ? 'bg-white/10 text-white font-medium'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
               )}
             >
               Pan & Sync
@@ -699,10 +701,10 @@ export function StaticWaveform({
               type="button"
               onClick={() => setEditMode('edit')}
               className={cn(
-                'px-2 py-0.5 text-xs rounded transition-colors whitespace-nowrap shrink-0',
+                'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0',
                 editMode === 'edit'
-                  ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
-                  : 'text-gray-400 hover:text-gray-200'
+                  ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
+                  : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
               )}
             >
               Edit Notes
@@ -710,23 +712,22 @@ export function StaticWaveform({
           </div>
           {totalEditsCount > 0 && (
             <span className="text-xs font-mono tabular-nums text-emerald-400">
-              {totalEditsCount} manual {totalEditsCount === 1 ? 'edit' : 'edits'}
+              {totalEditsCount} {totalEditsCount === 1 ? 'edit' : 'edits'}
             </span>
           )}
         </div>
 
         {editMode === 'edit' ? (
           <div className="flex flex-wrap items-center gap-2">
-            {/* Lane Brush Selector */}
-            <div className="flex items-center gap-1">
-              <span className="text-gray-500 mr-0.5">Add:</span>
+            {/* Flat Lane Brush Selector */}
+            <div className="inline-flex items-center gap-0.5">
               {laneRules.map((rule) => (
                 <button
                   key={rule.id}
                   type="button"
                   onClick={() => setBrushRuleId(rule.id)}
                   className={cn(
-                    'px-2 py-0.5 text-xs font-mono rounded border transition-colors whitespace-nowrap shrink-0',
+                    'px-1.5 py-0.5 text-xs font-mono rounded-sm transition-colors whitespace-nowrap shrink-0',
                     brushBtnClass(rule, activeBrushRule.id === rule.id)
                   )}
                   title={`Click grid to add ${rule.name}`}
@@ -736,8 +737,8 @@ export function StaticWaveform({
               ))}
             </div>
 
-            {/* Snap Subdivision */}
-            <div className="inline-flex p-0.5 bg-gray-950 border border-gray-800 rounded-md">
+            {/* Flat Snap Subdivision */}
+            <div className="inline-flex items-center gap-0.5">
               {(
                 [
                   { id: 4, label: '1/4' },
@@ -751,10 +752,10 @@ export function StaticWaveform({
                   type="button"
                   onClick={() => setSnapDivision(s.id)}
                   className={cn(
-                    'px-1.5 py-0.5 text-[11px] font-mono rounded transition-colors whitespace-nowrap shrink-0',
+                    'px-1.5 py-0.5 text-xs font-mono rounded-sm transition-colors whitespace-nowrap shrink-0',
                     snapDivision === s.id
-                      ? 'bg-gray-800 text-white font-semibold'
-                      : 'text-gray-400 hover:text-gray-200'
+                      ? 'bg-white/10 text-white font-semibold'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
                   )}
                 >
                   {s.label}
@@ -762,52 +763,56 @@ export function StaticWaveform({
               ))}
             </div>
 
-            {canUndoEdit && onUndoEdit && (
-              <button
-                type="button"
-                onClick={onUndoEdit}
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-gray-800 hover:bg-gray-700 text-gray-200 whitespace-nowrap shrink-0"
-                title="Undo last note edit"
-              >
-                <Undo2 className="w-3 h-3" />
-                <span>Undo</span>
-              </button>
-            )}
-            {totalEditsCount > 0 && onResetEdits && (
-              <button
-                type="button"
-                onClick={onResetEdits}
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded text-gray-400 hover:text-red-400 hover:bg-red-500/10 whitespace-nowrap shrink-0"
-                title="Clear all manual note additions and deletions"
-              >
-                <RotateCcw className="w-3 h-3" />
-                <span>Reset</span>
-              </button>
+            {(canUndoEdit || totalEditsCount > 0) && (
+              <div className="inline-flex items-center gap-0.5">
+                {canUndoEdit && onUndoEdit && (
+                  <button
+                    type="button"
+                    onClick={onUndoEdit}
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm hover:bg-white/[0.08] text-gray-200 whitespace-nowrap shrink-0"
+                    title="Undo last note edit"
+                  >
+                    <Undo2 className="w-3 h-3" />
+                    <span>Undo</span>
+                  </button>
+                )}
+                {totalEditsCount > 0 && onResetEdits && (
+                  <button
+                    type="button"
+                    onClick={onResetEdits}
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm text-gray-400 hover:text-red-400 hover:bg-red-500/10 whitespace-nowrap shrink-0"
+                    title="Clear all manual note additions and deletions"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset</span>
+                  </button>
+                )}
+              </div>
             )}
           </div>
         ) : (
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2.5">
             {showDrumMarkers && drumEvents.length > 0 && (
-              <span className="flex items-center gap-3 text-xs">
-                <span className="text-amber-400">K: Kick</span>
-                <span className="text-emerald-400">C: Clap/Snare</span>
-                <span className="text-sky-400">H: Hi-Hat</span>
+              <span className="flex items-center gap-2 text-xs">
+                <span className="text-amber-400">K</span>
+                <span className="text-emerald-400">C</span>
+                <span className="text-sky-400">H</span>
               </span>
             )}
-            <span>Scroll to Zoom · Drag Handles</span>
+            <span className="text-xs text-gray-500">Wheel: Zoom · Drag Handles</span>
           </div>
         )}
       </div>
       <canvas
         ref={canvasRef}
         width={800}
-        height={120}
+        height={110}
         style={{ cursor }}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        className="w-full h-[120px] bg-black rounded-md shadow-inner border border-gray-800 touch-none"
+        className="w-full h-[110px] bg-black touch-none block"
       />
     </div>
   );

@@ -152,16 +152,16 @@ export function GlobalTransport({
 
   return (
     <div
-      className="min-w-0 flex-1 flex items-center gap-2.5 px-3 py-1.5 bg-gray-900 border border-gray-800 rounded-lg"
+      className="min-w-0 flex-1 flex items-center gap-2"
       aria-label="Global Song Transport"
     >
-      {/* Compact Transport Controls */}
-      <div className="flex items-center gap-1 shrink-0">
+      {/* Flat Zero-Gap Transport Controls */}
+      <div className="inline-flex items-center shrink-0">
         <button
           type="button"
           onClick={() => hasAudio && engine.seek(0)}
           disabled={!hasAudio}
-          className="p-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-40 transition-colors"
+          className="p-1 text-gray-400 hover:text-white hover:bg-white/[0.06] rounded-sm disabled:opacity-40 transition-colors"
           title="Restart (0:00)"
         >
           <SkipBack className="w-3.5 h-3.5" />
@@ -171,7 +171,7 @@ export function GlobalTransport({
           type="button"
           onClick={() => stepBars(-1)}
           disabled={!hasAudio}
-          className="p-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-40 transition-colors"
+          className="p-1 text-gray-400 hover:text-white hover:bg-white/[0.06] rounded-sm disabled:opacity-40 transition-colors"
           title="Jump back 1 bar (4 beats)"
         >
           <ChevronLeft className="w-3.5 h-3.5" />
@@ -182,10 +182,10 @@ export function GlobalTransport({
           onClick={onTogglePlay}
           disabled={!hasAudio}
           className={cn(
-            'w-7 h-7 flex items-center justify-center rounded-md transition-colors shrink-0 disabled:opacity-40',
+            'w-6 h-5 flex items-center justify-center rounded-sm transition-colors shrink-0 disabled:opacity-40',
             isPlaying
               ? 'bg-emerald-500 text-gray-950 hover:bg-emerald-400'
-              : 'bg-gray-800 text-emerald-400 hover:bg-gray-700 hover:text-emerald-300'
+              : 'text-emerald-400 hover:bg-white/[0.08] hover:text-emerald-300'
           )}
           title="Play / Pause (Space)"
         >
@@ -200,7 +200,7 @@ export function GlobalTransport({
           type="button"
           onClick={() => stepBars(1)}
           disabled={!hasAudio}
-          className="p-1.5 rounded text-gray-400 hover:text-white hover:bg-gray-800 disabled:opacity-40 transition-colors"
+          className="p-1 text-gray-400 hover:text-white hover:bg-white/[0.06] rounded-sm disabled:opacity-40 transition-colors"
           title="Jump forward 1 bar (4 beats)"
         >
           <ChevronRight className="w-3.5 h-3.5" />
@@ -210,10 +210,10 @@ export function GlobalTransport({
           type="button"
           onClick={onToggleLoop}
           className={cn(
-            'p-1.5 rounded transition-colors',
+            'p-1 rounded-sm transition-colors',
             isLooping
-              ? 'text-emerald-400 bg-emerald-500/15 hover:bg-emerald-500/25'
-              : 'text-gray-500 hover:text-gray-200 hover:bg-gray-800'
+              ? 'text-emerald-400 hover:bg-emerald-500/15'
+              : 'text-gray-500 hover:text-gray-200 hover:bg-white/[0.06]'
           )}
           title={isLooping ? 'Loop: ON' : 'Loop: OFF'}
         >
@@ -234,11 +234,11 @@ export function GlobalTransport({
         aria-valuemin={0}
         aria-valuemax={Math.round(safeDuration)}
         className={cn(
-          'relative min-w-[72px] flex-1 h-7 flex items-center select-none touch-none group',
+          'relative min-w-[72px] flex-1 h-5 flex items-center select-none touch-none group',
           hasAudio ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'
         )}
       >
-        <div className="relative w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
+        <div className="relative w-full h-1 bg-white/10 rounded-full overflow-hidden">
           <div
             ref={fillRef}
             className="h-full bg-emerald-500 transition-none"
@@ -250,11 +250,11 @@ export function GlobalTransport({
         {hoverInfo && hasAudio && (
           <>
             <div
-              className="pointer-events-none absolute top-1.5 bottom-1.5 w-px bg-white/40"
+              className="pointer-events-none absolute top-1 bottom-1 w-px bg-white/40"
               style={{ left: `${hoverInfo.pct}%` }}
             />
             <div
-              className="pointer-events-none absolute -top-6 -translate-x-1/2 px-1.5 py-0.5 rounded bg-gray-950 border border-gray-800 text-[10px] font-mono tabular-nums text-gray-200 whitespace-nowrap shadow-md"
+              className="pointer-events-none absolute -top-7 -translate-x-1/2 px-1.5 py-0.5 rounded-sm bg-black/95 text-xs font-mono tabular-nums text-gray-200 whitespace-nowrap"
               style={{ left: `${Math.min(92, Math.max(8, hoverInfo.pct))}%` }}
             >
               {formatClock(hoverInfo.time)} · B{hoverInfo.beat.toFixed(1)}
@@ -265,20 +265,20 @@ export function GlobalTransport({
         {/* Playhead thumb */}
         <div
           ref={thumbRef}
-          className="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-white border-2 border-emerald-400 shadow-sm group-hover:scale-125 transition-transform"
+          className="pointer-events-none absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-full bg-white border-2 border-emerald-400 shadow-sm group-hover:scale-125 transition-transform"
           style={{ left: '0%' }}
         />
       </div>
 
       {/* Time & Beat Readout */}
-      <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono tabular-nums whitespace-nowrap shrink-0">
+      <div className="hidden sm:flex items-center gap-1 text-xs font-mono tabular-nums whitespace-nowrap shrink-0">
         <span ref={timeTextRef} className="text-gray-200">
           0:00.0 / {formatTotal(safeDuration)}
         </span>
         <span className="text-gray-600" aria-hidden="true">
           ·
         </span>
-        <span ref={beatTextRef} className="text-emerald-400 min-w-[44px] text-right">
+        <span ref={beatTextRef} className="text-emerald-400 min-w-[40px] text-right">
           B0.0
         </span>
       </div>

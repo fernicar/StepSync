@@ -398,8 +398,81 @@ function inspectFloatStats(arr: Float32Array, length = arr.length): {
   return { maxAbs, nanCount, infCount };
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+interface WorkerGpuAdapterLike {
+  features?: Iterable<string>;
+  limits?: {
+    maxBufferSize?: number;
+    maxStorageBufferBindingSize?: number;
+  };
+  requestDevice?: (desc?: Record<string, unknown>) => Promise<unknown>;
+}
+
+async function requestFreshGpuDevice(): Promise<unknown | undefined> {
+  const gpu = (
+    navigator as unknown as {
+      gpu?: {
+        requestAdapter: (opts?: { powerPreference?: 'high-performance' | 'low-power' }) => Promise<WorkerGpuAdapterLike | null>;
+      };
+    }
+  ).gpu;
+  if (!gpu) return undefined;
+
+  const adapter =
+    (await gpu.requestAdapter({ powerPreference: 'high-performance' }).catch(() => null)) ??
+    (await gpu.requestAdapter().catch(() => null));
+  if (!adapter || typeof adapter.requestDevice !== 'function') return undefined;
+
+  const requiredFeatures = adapter.features ? Array.from(adapter.features) : [];
+  const requiredLimits: Record<string, number> = {};
+  if (adapter.limits?.maxBufferSize) {
+    requiredLimits.maxBufferSize = Math.min(adapter.limits.maxBufferSize, 1024 * 1024 * 1024);
+  }
+  if (adapter.limits?.maxStorageBufferBindingSize) {
+    requiredLimits.maxStorageBufferBindingSize = Math.min(
+      adapter.limits.maxStorageBufferBindingSize,
+      512 * 1024 * 1024
+    );
+  }
+
+  try {
+    return await adapter.requestDevice({
+      ...(requiredFeatures.length > 0 ? { requiredFeatures } : {}),
+      ...(Object.keys(requiredLimits).length > 0 ? { requiredLimits } : {}),
+    });
+  } catch {
+    try {
+      return await adapter.requestDevice(
+        requiredFeatures.length > 0 ? { requiredFeatures } : undefined
+      );
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+async function drainWebGpuQueue(): Promise<void> {
+  try {
+    const devPromise = (
+      ort.env.webgpu as unknown as {
+        device?: Promise<{ queue?: { onSubmittedWorkDone?: () => Promise<void> } }>;
+      }
+    ).device;
+    if (devPromise && typeof (devPromise as Promise<unknown>).then === 'function') {
+      const dev = await devPromise;
+      if (dev?.queue?.onSubmittedWorkDone) {
+        await dev.queue.onSubmittedWorkDone();
+      }
+    }
+  } catch {
+    // Ignore queue sync errors cleanly
+  }
+}
+
 /**
- * WebGPU HT-Demucs ONNX inference with 7.8s overlap-add chunking.
+ * WebGPU HT-Demucs ONNX inference with 7.8s overlap-add chunking,
+ * VRAM-safe buffer reuse, inter-chunk GPU queue drain, and mid-loop recovery.
  */
 async function runWebGpuDemucs(
   left: Float32Array,
@@ -458,34 +531,72 @@ async function runWebGpuDemucs(
 
   // IMPORTANT: htdemucs_4s.opt.fp16.istft.onnx is already optimized prior to fp16 conversion.
   // Running ORT graph optimizers again at runtime ('all') can overflow folded fp16 constants to NaN.
-  const createSession = async (
-    providers: ('webgpu' | 'wasm')[],
-    optLevel: 'disabled' | 'basic' | 'all'
+  // Use 'simple' static-shape buffer caching to prevent bucket VRAM growth across chunks.
+  // Keep initial GPUDevice creation native to ORT so required adapter features stay intact.
+  const createWebGpuSession = async (
+    optLevel: 'disabled' | 'basic',
+    fallbackToWasm: boolean,
+    withFreshDevice = false
   ) => {
+    let customDevice: unknown | undefined;
+    if (withFreshDevice) {
+      customDevice = await requestFreshGpuDevice();
+      if (customDevice) {
+        try {
+          (ort.env.webgpu as unknown as { device?: unknown }).device = customDevice;
+        } catch {
+          // Ignore if ORT locks global device setter
+        }
+      }
+    }
+
+    const webgpuEp = {
+      name: 'webgpu',
+      storageBufferCacheMode: 'simple',
+      uniformBufferCacheMode: 'simple',
+      ...(customDevice ? { device: customDevice as never } : {}),
+    } as NonNullable<ort.InferenceSession.SessionOptions['executionProviders']>[number];
+
+    try {
+      return await ort.InferenceSession.create(modelBuffer!, {
+        executionProviders: fallbackToWasm ? [webgpuEp, 'wasm'] : [webgpuEp],
+        graphOptimizationLevel: optLevel,
+      });
+    } catch {
+      return await ort.InferenceSession.create(modelBuffer!, {
+        executionProviders: fallbackToWasm ? ['webgpu', 'wasm'] : ['webgpu'],
+        graphOptimizationLevel: optLevel,
+      });
+    }
+  };
+
+  const createWasmSession = async () => {
     return await ort.InferenceSession.create(modelBuffer!, {
-      executionProviders: providers,
-      graphOptimizationLevel: optLevel,
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'disabled',
     });
   };
 
   let backendUsed = 'webgpu+wasm (opt=disabled)';
+  let isWasmSession = false;
   let session: ort.InferenceSession;
   try {
-    session = await createSession(['webgpu', 'wasm'], 'disabled');
+    session = await createWebGpuSession('disabled', true, false);
   } catch (err1) {
     try {
       backendUsed = 'webgpu+wasm (opt=basic)';
-      session = await createSession(['webgpu', 'wasm'], 'basic');
+      session = await createWebGpuSession('basic', true, false);
     } catch (err2) {
       try {
         backendUsed = 'wasm (opt=disabled)';
+        isWasmSession = true;
         postMsg({
           type: 'progress',
           status: 'loading-model',
           progress: 100,
           stage: 'WebGPU session unsupported for this model; falling back to WASM...',
         });
-        session = await createSession(['wasm'], 'disabled');
+        session = await createWasmSession();
       } catch (err3) {
         const msg1 = err1 instanceof Error ? err1.message : String(err1);
         const msg2 = err2 instanceof Error ? err2.message : String(err2);
@@ -524,26 +635,42 @@ async function runWebGpuDemucs(
     }
 
     const inputTensor = new ort.Tensor('float32', mixChunk, [1, 2, SEG_LEN]);
-    const results = await sess.run({ [inputName]: inputTensor });
-    const outputTensor = results[outputName];
-    const dims = outputTensor.dims;
-    const type = outputTensor.type;
-    const rawData = await outputTensor.getData();
-    const outData = rawData as Float32Array;
+    let results: Record<string, ort.Tensor> | null = null;
+    try {
+      results = await sess.run({ [inputName]: inputTensor });
+      const outputTensor = results[outputName];
+      const dims = outputTensor.dims;
+      const type = outputTensor.type;
+      const rawData = await outputTensor.getData();
+      const outData = rawData as Float32Array;
 
-    // Copy stem 0 (Drums) stereo channels before disposing tensor
-    const leftOut = new Float32Array(copyLen);
-    const rightOut = new Float32Array(copyLen);
-    leftOut.set(outData.subarray(0, copyLen));
-    rightOut.set(outData.subarray(SEG_LEN, SEG_LEN + copyLen));
+      // Copy stem 0 (Drums) stereo channels before disposing tensors
+      const leftOut = new Float32Array(copyLen);
+      const rightOut = new Float32Array(copyLen);
+      leftOut.set(outData.subarray(0, copyLen));
+      rightOut.set(outData.subarray(SEG_LEN, SEG_LEN + copyLen));
 
-    inputTensor.dispose();
-    outputTensor.dispose();
-
-    return { leftOut, rightOut, copyLen, inputPeak, dims, type };
+      return { leftOut, rightOut, copyLen, inputPeak, dims, type };
+    } finally {
+      try {
+        inputTensor.dispose();
+      } catch {
+        // Ignore disposal error after device loss
+      }
+      if (results) {
+        for (const t of Object.values(results)) {
+          try {
+            t.dispose();
+          } catch {
+            // Ignore disposal error after device loss
+          }
+        }
+      }
+    }
   };
 
   let note: string | undefined;
+  let webgpuRecoveryAttempts = 0;
 
   try {
     // Find first non-silent chunk to validate that the GPU execution produces valid non-NaN audio
@@ -562,11 +689,35 @@ async function runWebGpuDemucs(
       }
     }
 
-    let probeResult = await runChunk(session, probeChunkIdx);
+    let probeResult: Awaited<ReturnType<typeof runChunk>> | null = null;
+    try {
+      probeResult = await runChunk(session, probeChunkIdx);
+    } catch (probeErr) {
+      if (isWasmSession) throw probeErr;
+      try {
+        await session.release();
+      } catch {
+        // Ignore release error on lost device
+      }
+      const errDetail = probeErr instanceof Error ? probeErr.message : String(probeErr);
+      backendUsed = 'wasm fallback (opt=disabled)';
+      isWasmSession = true;
+      note = `WebGPU failed during probe (${errDetail}); separated via WASM fallback.`;
+      postMsg({
+        type: 'progress',
+        status: 'loading-model',
+        progress: 100,
+        stage: 'WebGPU device failed during probe; switching to WASM CPU...',
+      });
+      session = await createWasmSession();
+      probeResult = await runChunk(session, probeChunkIdx);
+    }
+
     let probeStatsL = inspectFloatStats(probeResult.leftOut);
     let probeStatsR = inspectFloatStats(probeResult.rightOut);
 
     if (
+      !isWasmSession &&
       probeResult.inputPeak > 0.005 &&
       (probeStatsL.nanCount > 0 ||
         probeStatsR.nanCount > 0 ||
@@ -576,7 +727,11 @@ async function runWebGpuDemucs(
     ) {
       // WebGPU shader overflowed or returned zeros on this hardware; retry via WASM CPU EP
       const webgpuDiag = `ep=${backendUsed}, dims=[${probeResult.dims.join(',')}], type=${probeResult.type}, nan=${probeStatsL.nanCount + probeStatsR.nanCount}, maxAbs=${Math.max(probeStatsL.maxAbs, probeStatsR.maxAbs).toExponential(2)}`;
-      await session.release();
+      try {
+        await session.release();
+      } catch {
+        // Ignore
+      }
 
       postMsg({
         type: 'progress',
@@ -586,8 +741,9 @@ async function runWebGpuDemucs(
       });
 
       backendUsed = 'wasm fallback (opt=disabled)';
+      isWasmSession = true;
       note = `WebGPU overflowed on GPU (${webgpuDiag}); separated via WASM fallback.`;
-      session = await createSession(['wasm'], 'disabled');
+      session = await createWasmSession();
       probeResult = await runChunk(session, probeChunkIdx);
       probeStatsL = inspectFloatStats(probeResult.leftOut);
       probeStatsR = inspectFloatStats(probeResult.rightOut);
@@ -610,7 +766,69 @@ async function runWebGpuDemucs(
 
     for (let c = 0; c < totalChunks; c++) {
       const start = c * step;
-      const chunkRes = c === probeChunkIdx ? probeResult : await runChunk(session, c);
+      let chunkRes: Awaited<ReturnType<typeof runChunk>>;
+
+      if (c === probeChunkIdx && probeResult) {
+        chunkRes = probeResult;
+        probeResult = null;
+      } else {
+        // Drain GPU queue & yield briefly between chunks to avoid TDR/VRAM accumulation
+        if (!isWasmSession && c > 0) {
+          await drainWebGpuQueue();
+          await sleep(60);
+        }
+
+        try {
+          chunkRes = await runChunk(session, c);
+        } catch (chunkErr) {
+          if (isWasmSession) throw chunkErr;
+
+          try {
+            await session.release();
+          } catch {
+            // Ignore release error on lost device
+          }
+
+          let recoveredOnWebGpu = false;
+          if (webgpuRecoveryAttempts < 1) {
+            webgpuRecoveryAttempts++;
+            postMsg({
+              type: 'progress',
+              status: 'processing',
+              progress: Math.min(89, Math.round((c / totalChunks) * 89)),
+              stage: `WebGPU device reset at chunk ${c + 1}/${totalChunks}; recreating GPU session...`,
+            });
+            await sleep(350);
+            try {
+              session = await createWebGpuSession('disabled', false, true);
+              chunkRes = await runChunk(session, c);
+              recoveredOnWebGpu = true;
+              note = `Recovered WebGPU session after GPU reset at chunk ${c + 1}/${totalChunks}.`;
+            } catch {
+              try {
+                await session.release();
+              } catch {
+                // Ignore
+              }
+            }
+          }
+
+          if (!recoveredOnWebGpu) {
+            const errMsg = chunkErr instanceof Error ? chunkErr.message : String(chunkErr);
+            postMsg({
+              type: 'progress',
+              status: 'processing',
+              progress: Math.min(89, Math.round((c / totalChunks) * 89)),
+              stage: `WebGPU lost device at chunk ${c + 1}/${totalChunks}; continuing via WASM CPU...`,
+            });
+            backendUsed = 'wasm continuation (opt=disabled)';
+            isWasmSession = true;
+            note = `WebGPU lost device at chunk ${c + 1}/${totalChunks} (${errMsg.slice(0, 80)}); finished remaining chunks via WASM CPU.`;
+            session = await createWasmSession();
+            chunkRes = await runChunk(session, c);
+          }
+        }
+      }
 
       for (let i = 0; i < chunkRes.copyLen; i++) {
         let w = 1.0;
@@ -639,7 +857,7 @@ async function runWebGpuDemucs(
         type: 'progress',
         status: 'processing',
         progress: pct,
-        stage: `Separating drums via ${backendUsed.startsWith('wasm') ? 'WASM fallback' : 'WebGPU'} (chunk ${c + 1} / ${totalChunks})...`,
+        stage: `Separating drums via ${isWasmSession ? 'WASM fallback' : 'WebGPU'} (chunk ${c + 1} / ${totalChunks})...`,
       });
     }
 
@@ -673,7 +891,11 @@ async function runWebGpuDemucs(
       },
     };
   } finally {
-    await session.release();
+    try {
+      await session.release();
+    } catch {
+      // Ignore release error if device was already lost
+    }
   }
 }
 

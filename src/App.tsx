@@ -12,6 +12,8 @@ import {
   AlertCircle,
   Download,
   FolderOpen,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { engine, SimDrumBand } from './lib/AudioEngine';
 import { analyzeAudio, detectOnsets } from './lib/audioProcessing';
@@ -29,8 +31,18 @@ import {
   checkDemucsModelCached,
   checkWebGpuSupport,
   clearDemucsModelCache,
+  createAudioBufferFromChannels,
   separateDrumStem,
 } from './lib/stemWorkerClient';
+import {
+  CachedDrumPcm,
+  decodeAnalysisCacheArrayBuffer,
+  deleteTrackFromStorageDb,
+  encodeAnalysisCacheBlob,
+  loadTrackFromStorageDb,
+  saveTrackToStorageDb,
+  triggerBlobDownload,
+} from './lib/projectCache';
 import {
   Section,
   SectionDensity,
@@ -56,7 +68,7 @@ import { cn } from './lib/utils';
 import { Waveform } from './components/Waveform';
 import { Simulator } from './components/Simulator';
 import { StaticWaveform } from './components/StaticWaveform';
-import { AuditionMode, StemStudio } from './components/StemStudio';
+import { AuditionMode, CacheSourceKind, StemStudio } from './components/StemStudio';
 import { GlobalTransport } from './components/GlobalTransport';
 import { SpectrumVisualizer } from './components/SpectrumVisualizer';
 
@@ -149,6 +161,40 @@ export default function App() {
     type: 'ok' | 'error';
     text: string;
   } | null>(null);
+  const [cacheSource, setCacheSource] = useState<CacheSourceKind>(null);
+  const [spectralBuildNonce, setSpectralBuildNonce] = useState(0);
+  const [hydratedFileKey, setHydratedFileKey] = useState<string | null>(null);
+  const [syncPanelOpen, setSyncPanelOpen] = useState(false);
+  const [startDraft, setStartDraft] = useState('');
+  const [startFocused, setStartFocused] = useState(false);
+  const [endDraft, setEndDraft] = useState('');
+  const [endFocused, setEndFocused] = useState(false);
+  const endFocusLockedNRef = useRef<number | null>(null);
+  const [sectionsPanelOpen, setSectionsPanelOpen] = useState(false);
+  const [matrixOpen, setMatrixOpen] = useState(false);
+  const [outputsPanelOpen, setOutputsPanelOpen] = useState(false);
+  const [rootFontPx, setRootFontPx] = useState<number>(() => {
+    try {
+      const saved = parseInt(localStorage.getItem('stepsync-root-font-px') || '20', 10);
+      if (!Number.isNaN(saved) && saved >= 18 && saved <= 28) return saved;
+    } catch {
+      // Ignore storage access errors
+    }
+    return 20;
+  });
+
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${rootFontPx}px`;
+    try {
+      localStorage.setItem('stepsync-root-font-px', String(rootFontPx));
+    } catch {
+      // Ignore storage access errors
+    }
+  }, [rootFontPx]);
+
+  const skipNextSpectralBuildForBufferRef = useRef<AudioBuffer | null>(null);
+  const customDrumPcmRef = useRef<CachedDrumPcm | null>(null);
+  const stemClearedRef = useRef<boolean>(false);
 
   useEffect(() => {
     checkWebGpuSupport().then(setWebGpuInfo);
@@ -200,6 +246,11 @@ export default function App() {
       return;
     }
 
+    if (skipNextSpectralBuildForBufferRef.current === drumBuffer) {
+      skipNextSpectralBuildForBufferRef.current = null;
+      return;
+    }
+
     const ch0 = drumBuffer.getChannelData(0);
     const mono = new Float32Array(ch0.length);
     if (drumBuffer.numberOfChannels > 1) {
@@ -231,7 +282,7 @@ export default function App() {
       cancelled = true;
       worker.terminate();
     };
-  }, [drumBuffer]);
+  }, [drumBuffer, spectralBuildNonce]);
 
   // Re-detect lane-mapped DrumEvents instantaneously whenever lane rules, Hz bounds, or sync change
   useEffect(() => {
@@ -256,12 +307,69 @@ export default function App() {
     );
   }, [bandEnvelopes, laneRules, sync.bpm, sync.offset, quantizeDrums, spectralCache]);
 
-  const tryAutoLoadCompanionDrumStem = async (
+  const extractDrumPcm = (buf: AudioBuffer): CachedDrumPcm => {
+    const ch0 = buf.getChannelData(0);
+    const left = new Float32Array(ch0.length);
+    left.set(ch0);
+    const right = new Float32Array(ch0.length);
+    if (buf.numberOfChannels > 1) {
+      right.set(buf.getChannelData(1));
+    } else {
+      right.set(ch0);
+    }
+    return { sampleRate: buf.sampleRate, left, right };
+  };
+
+  const fetchPublicCompanionProject = async (
+    audioFileName: string
+  ): Promise<StepSyncProject | null> => {
+    const baseName = audioFileName.replace(/\.[^/.]+$/, '');
+    try {
+      const res = await fetch(`/${encodeURIComponent(baseName)}.stepsync.json`);
+      if (!res.ok) return null;
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('text/html')) return null;
+      const parsed = (await res.json()) as Partial<StepSyncProject>;
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        parsed.version !== 1 ||
+        !parsed.sync ||
+        !Array.isArray(parsed.sections) ||
+        !Array.isArray(parsed.laneRules)
+      ) {
+        return null;
+      }
+      return parsed as StepSyncProject;
+    } catch {
+      return null;
+    }
+  };
+
+  const fetchPublicAnalysisCache = async (audioFileName: string) => {
+    const baseName = audioFileName.replace(/\.[^/.]+$/, '');
+    try {
+      const res = await fetch(`/${encodeURIComponent(baseName)}.stepsync.cache`);
+      if (!res.ok) return null;
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('text/html')) return null;
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength === 0) return null;
+      return await decodeAnalysisCacheArrayBuffer(buf);
+    } catch {
+      return null;
+    }
+  };
+
+  const fetchCompanionDrumAudioOnly = async (
     audioFileName: string,
     audioCtx: AudioContext
-  ): Promise<boolean> => {
+  ): Promise<{ buffer: AudioBuffer; url: string } | null> => {
     const baseName = audioFileName.replace(/\.[^/.]+$/, '');
-    const candidates = [`/${encodeURIComponent(baseName)}_drums.mp3`, `/${encodeURIComponent(baseName)}_drums.wav`];
+    const candidates = [
+      `/${encodeURIComponent(baseName)}_drums.mp3`,
+      `/${encodeURIComponent(baseName)}_drums.wav`,
+    ];
     for (const url of candidates) {
       try {
         const res = await fetch(url);
@@ -270,43 +378,289 @@ export default function App() {
         if (ct.includes('text/html')) continue;
         const arr = await res.arrayBuffer();
         if (arr.byteLength === 0) continue;
-
-        const decodedDrum = await audioCtx.decodeAudioData(arr);
-        const envelopes = analyzePreSeparatedDrumBuffer(decodedDrum);
-
-        let peakAmplitude = 0;
-        for (let ch = 0; ch < decodedDrum.numberOfChannels; ch++) {
-          const data = decodedDrum.getChannelData(ch);
-          for (let i = 0; i < data.length; i += 16) {
-            const a = Math.abs(data[i]);
-            if (a > peakAmplitude) peakAmplitude = a;
-          }
-        }
-
-        setDrumBuffer(decodedDrum);
-        setSpectralCache(null);
-        engine.setDrumBuffer(decodedDrum);
-        setBandEnvelopes(envelopes);
-        setStemDiagnostics({
-          backendUsed: `Pre-separated (${url})`,
-          peakAmplitude,
-          nanSamplesReplaced: 0,
-          chunksProcessed: 1,
-        });
-        setStemStatus('ready');
-        setStemProgress(100);
-        setStemStage(`Loaded ${url}`);
-        return true;
+        const buffer = await audioCtx.decodeAudioData(arr);
+        return { buffer, url };
       } catch {
         // Ignore missing/unreadable candidate and check next
       }
     }
-    return false;
+    return null;
+  };
+
+  const applyProjectSettings = (parsed: Partial<StepSyncProject>) => {
+    if (
+      parsed.sync &&
+      typeof parsed.sync.bpm === 'number' &&
+      typeof parsed.sync.offset === 'number'
+    ) {
+      setSync({
+        bpm: parsed.sync.bpm,
+        offset: parsed.sync.offset,
+        metronomeActive: Boolean(parsed.sync.metronomeActive),
+        volume: typeof parsed.sync.volume === 'number' ? parsed.sync.volume : 1.0,
+      });
+    }
+
+    if (Array.isArray(parsed.sections)) {
+      setSections(parsed.sections);
+    }
+    if (parsed.difficultyMatrix) {
+      setDifficultyMatrix(parsed.difficultyMatrix);
+    }
+    if (Array.isArray(parsed.laneRules)) {
+      setLaneRules(parsed.laneRules);
+    }
+    if (typeof parsed.quantizeDrums === 'boolean') setQuantizeDrums(parsed.quantizeDrums);
+    if (typeof parsed.delayCompensation === 'number') setDelayCompensation(parsed.delayCompensation);
+    if (
+      parsed.auditionMode === 'mix' ||
+      parsed.auditionMode === 'drums' ||
+      parsed.auditionMode === 'blend'
+    ) {
+      setAuditionMode(parsed.auditionMode);
+    }
+    if (typeof parsed.blendRatio === 'number') setBlendRatio(parsed.blendRatio);
+    if (
+      parsed.simulatorDifficulty === 'easy' ||
+      parsed.simulatorDifficulty === 'normal' ||
+      parsed.simulatorDifficulty === 'hard'
+    ) {
+      setSimulatorDifficulty(parsed.simulatorDifficulty);
+    }
+    if (
+      parsed.simSoundMode === 'demo' ||
+      parsed.simSoundMode === 'sync' ||
+      parsed.simSoundMode === 'input'
+    ) {
+      setSimSoundMode(parsed.simSoundMode);
+    }
+    if (parsed.simSoundEnabled) {
+      setSimSoundEnabled({
+        kick: Boolean(parsed.simSoundEnabled.kick),
+        snare: Boolean(parsed.simSoundEnabled.snare),
+        hat: Boolean(parsed.simSoundEnabled.hat),
+        tom: Boolean(parsed.simSoundEnabled.tom),
+      });
+    }
+    if (typeof parsed.simVolume === 'number') setSimVolume(parsed.simVolume);
+
+    if (
+      parsed.manualEdits &&
+      Array.isArray(parsed.manualEdits.suppressions) &&
+      Array.isArray(parsed.manualEdits.additions)
+    ) {
+      setManualEdits(parsed.manualEdits);
+    } else {
+      setManualEdits({ suppressions: [], additions: [] });
+    }
+    setManualEditHistory([]);
+  };
+
+  const tryAutoLoadCompanionDrumStem = async (
+    audioFileName: string,
+    audioCtx: AudioContext
+  ): Promise<boolean> => {
+    const companion = await fetchCompanionDrumAudioOnly(audioFileName, audioCtx);
+    if (!companion) return false;
+
+    const { buffer: decodedDrum, url } = companion;
+    const envelopes = analyzePreSeparatedDrumBuffer(decodedDrum);
+
+    let peakAmplitude = 0;
+    for (let ch = 0; ch < decodedDrum.numberOfChannels; ch++) {
+      const data = decodedDrum.getChannelData(ch);
+      for (let i = 0; i < data.length; i += 16) {
+        const a = Math.abs(data[i]);
+        if (a > peakAmplitude) peakAmplitude = a;
+      }
+    }
+
+    customDrumPcmRef.current = null;
+    stemClearedRef.current = false;
+    setDrumBuffer(decodedDrum);
+    setSpectralCache(null);
+    engine.setDrumBuffer(decodedDrum);
+    setBandEnvelopes(envelopes);
+    setStemDiagnostics({
+      backendUsed: `Pre-separated (${url})`,
+      peakAmplitude,
+      nanSamplesReplaced: 0,
+      chunksProcessed: 1,
+    });
+    setStemStatus('ready');
+    setStemProgress(100);
+    setStemStage(`Loaded ${url}`);
+    setCacheSource('computed');
+    return true;
+  };
+
+  const hydrateTrackWithPublicAndDb = async (
+    fileName: string,
+    decodedData: AudioBuffer,
+    audioCtx: AudioContext,
+    fallbackMeta: AudioMetadata,
+    applyFallbackSync?: () => Promise<void>
+  ) => {
+    const [dbEntry, publicProject, publicCache] = await Promise.all([
+      loadTrackFromStorageDb(fileName),
+      fetchPublicCompanionProject(fileName),
+      fetchPublicAnalysisCache(fileName),
+    ]);
+
+    const dbUpdatedMs = dbEntry?.updatedAt ? Date.parse(dbEntry.updatedAt) : 0;
+    const publicExportedMs = publicProject?.exportedAt ? Date.parse(publicProject.exportedAt) : 0;
+    const preferPublicProject =
+      Boolean(publicProject) && (!dbEntry?.project || publicExportedMs > dbUpdatedMs);
+    const chosenProject = preferPublicProject
+      ? publicProject
+      : dbEntry?.project ?? publicProject ?? null;
+
+    if (chosenProject) {
+      applyProjectSettings(chosenProject);
+    } else if (applyFallbackSync) {
+      await applyFallbackSync();
+    }
+
+    // 1. User previously executed Clean Start / Clear Stem for this track: respect cleared state
+    if (dbEntry?.stemCleared && !preferPublicProject) {
+      stemClearedRef.current = true;
+      customDrumPcmRef.current = null;
+      setDrumBuffer(null);
+      engine.setDrumBuffer(null);
+      setBandEnvelopes(null);
+      setSpectralCache(null);
+      setStemDiagnostics(null);
+      setStemStatus('idle');
+      setStemProgress(0);
+      setStemStage('');
+      setAuditionMode('mix');
+      setCacheSource('cleared');
+
+      if (chosenProject?.drumEvents && chosenProject.drumEvents.length > 0) {
+        const restoredEvents = chosenProject.drumEvents;
+        const restoredOnsets = [...new Set(restoredEvents.map((ev) => ev.time))].sort(
+          (a, b) => a - b
+        );
+        setAudioMeta({
+          ...fallbackMeta,
+          drumEvents: restoredEvents,
+          onsets: restoredOnsets,
+        });
+      } else {
+        setAudioMeta(fallbackMeta);
+      }
+      setHydratedFileKey(fileName);
+      return;
+    }
+
+    // 2. Restore cached bandEnvelopes & spectralCache from StorageDB or /public/*.stepsync.cache
+    const usePublicCache =
+      Boolean(publicCache?.envelopes) &&
+      (!dbEntry?.envelopes ||
+        (dbEntry.source !== 'computed' && publicExportedMs > dbUpdatedMs));
+    const resolvedEnvelopes = usePublicCache
+      ? publicCache!.envelopes!
+      : dbEntry?.envelopes ?? publicCache?.envelopes ?? null;
+
+    if (resolvedEnvelopes) {
+      const resolvedSource: 'public' | 'indexeddb' = usePublicCache
+        ? 'public'
+        : dbEntry?.envelopes
+        ? 'indexeddb'
+        : 'public';
+      const resolvedSpectral =
+        resolvedSource === 'public'
+          ? publicCache?.spectralCache ?? null
+          : dbEntry?.spectralCache ?? publicCache?.spectralCache ?? null;
+      const resolvedDiagnostics =
+        resolvedSource === 'public'
+          ? publicCache?.diagnostics ?? null
+          : dbEntry?.diagnostics ?? publicCache?.diagnostics ?? null;
+
+      stemClearedRef.current = false;
+      setAudioMeta(fallbackMeta);
+
+      let restoredDrumBuffer: AudioBuffer | null = null;
+      if (resolvedSource === 'indexeddb' && dbEntry?.drumPcm) {
+        customDrumPcmRef.current = dbEntry.drumPcm;
+        restoredDrumBuffer = createAudioBufferFromChannels(
+          dbEntry.drumPcm.left,
+          dbEntry.drumPcm.right,
+          dbEntry.drumPcm.sampleRate
+        );
+      } else {
+        customDrumPcmRef.current = null;
+        const companion = await fetchCompanionDrumAudioOnly(fileName, audioCtx);
+        restoredDrumBuffer = companion?.buffer ?? null;
+      }
+
+      if (restoredDrumBuffer) {
+        if (resolvedSpectral) {
+          skipNextSpectralBuildForBufferRef.current = restoredDrumBuffer;
+        }
+        setDrumBuffer(restoredDrumBuffer);
+        engine.setDrumBuffer(restoredDrumBuffer);
+      } else {
+        setDrumBuffer(null);
+        engine.setDrumBuffer(null);
+      }
+
+      setSpectralCache(resolvedSpectral);
+      setBandEnvelopes(resolvedEnvelopes);
+      setStemDiagnostics(resolvedDiagnostics);
+      setStemStatus('ready');
+      setStemProgress(100);
+      setStemStage(
+        resolvedSource === 'public'
+          ? 'Loaded cached analysis from public/'
+          : 'Loaded cached analysis from browser storage'
+      );
+      setCacheSource(resolvedSource);
+
+      if (resolvedSource === 'public') {
+        await saveTrackToStorageDb({
+          fileName,
+          updatedAt: new Date().toISOString(),
+          source: 'public',
+          project: chosenProject ?? undefined,
+          envelopes: resolvedEnvelopes,
+          spectralCache: resolvedSpectral,
+          diagnostics: resolvedDiagnostics,
+          drumPcm: null,
+          stemCleared: false,
+        });
+      }
+      setHydratedFileKey(fileName);
+      return;
+    }
+
+    // 3. No cached envelopes: check companion *_drums.mp3|.wav (unless we have a JSON-only chart with no drum file)
+    stemClearedRef.current = false;
+    setAudioMeta(fallbackMeta);
+    const loadedCompanion = await tryAutoLoadCompanionDrumStem(fileName, audioCtx);
+    if (!loadedCompanion && chosenProject?.drumEvents && chosenProject.drumEvents.length > 0) {
+      const restoredEvents = chosenProject.drumEvents;
+      const restoredOnsets = [...new Set(restoredEvents.map((ev) => ev.time))].sort(
+        (a, b) => a - b
+      );
+      setAudioMeta({
+        fileName,
+        sampleRate: decodedData.sampleRate,
+        duration: decodedData.duration,
+        drumEvents: restoredEvents,
+        onsets: restoredOnsets,
+      });
+      setStemStatus('idle');
+      setCacheSource(publicProject ? 'public' : dbEntry ? 'indexeddb' : null);
+    }
+
+    setHydratedFileKey(fileName);
   };
 
   useEffect(() => {
     const loadDefaultAudio = async () => {
       try {
+        setHydratedFileKey(null);
         const response = await fetch('/166.m4a');
         if (!response.ok) return;
         const arrayBuffer = await response.arrayBuffer();
@@ -354,20 +708,26 @@ export default function App() {
           initialOnsets = await detectOnsets(decodedData);
         }
 
-        setAudioMeta({
+        const fallbackMeta: AudioMetadata = {
           fileName: '166.m4a',
           sampleRate: decodedData.sampleRate,
           duration: decodedData.duration,
           onsets: initialOnsets,
-        });
+        };
 
-        setSync((s) => ({
-          ...s,
-          bpm: 96.0,
-          offset: 0.16,
-        }));
-
-        await tryAutoLoadCompanionDrumStem('166.m4a', audioCtx);
+        await hydrateTrackWithPublicAndDb(
+          '166.m4a',
+          decodedData,
+          audioCtx,
+          fallbackMeta,
+          async () => {
+            setSync((s) => ({
+              ...s,
+              bpm: 96.0,
+              offset: 0.16,
+            }));
+          }
+        );
       } catch (e) {
         console.error('Failed to load default audio', e);
       }
@@ -447,12 +807,16 @@ export default function App() {
     setUploadError(null);
 
     try {
+      setHydratedFileKey(null);
       const arrayBuffer = await file.arrayBuffer();
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const decodedData = await audioCtx.decodeAudioData(arrayBuffer);
 
-      // Clear any previous drum stem when loading a new track
+      // Clear previous stem state cleanly before hydrating the newly loaded track
       cancelActiveSeparation();
+      customDrumPcmRef.current = null;
+      stemClearedRef.current = false;
+      setCacheSource(null);
       setDrumBuffer(null);
       setBandEnvelopes(null);
       setSpectralCache(null);
@@ -465,31 +829,35 @@ export default function App() {
       setManualEditHistory([]);
       setProjectStatus(null);
 
-      setAudioMeta({
+      const fallbackMeta: AudioMetadata = {
         fileName: file.name,
         sampleRate: decodedData.sampleRate,
         duration: decodedData.duration,
-      });
-
+      };
+      setAudioMeta(fallbackMeta);
       engine.setBuffer(decodedData);
 
-      const result = await analyzeAudio(decodedData);
-      const onsets = await detectOnsets(decodedData);
-
-      setAudioMeta({
-        fileName: file.name,
-        sampleRate: decodedData.sampleRate,
-        duration: decodedData.duration,
-        onsets,
-      });
-
-      setSync((s) => ({
-        ...s,
-        bpm: result.bpm,
-        offset: Number(result.offset.toFixed(3)),
-      }));
-
-      await tryAutoLoadCompanionDrumStem(file.name, audioCtx);
+      await hydrateTrackWithPublicAndDb(
+        file.name,
+        decodedData,
+        audioCtx,
+        fallbackMeta,
+        async () => {
+          const result = await analyzeAudio(decodedData);
+          const onsets = await detectOnsets(decodedData);
+          setAudioMeta({
+            fileName: file.name,
+            sampleRate: decodedData.sampleRate,
+            duration: decodedData.duration,
+            onsets,
+          });
+          setSync((s) => ({
+            ...s,
+            bpm: result.bpm,
+            offset: Number(result.offset.toFixed(3)),
+          }));
+        }
+      );
     } catch {
       setUploadError('Unsupported audio encoding. Please try a standard WAV, MP3, OGG, or M4A file.');
     }
@@ -574,6 +942,8 @@ export default function App() {
         customBuffer
       );
 
+      customDrumPcmRef.current = extractDrumPcm(result.drumBuffer);
+      stemClearedRef.current = false;
       setDrumBuffer(result.drumBuffer);
       setSpectralCache(null);
       engine.setDrumBuffer(result.drumBuffer);
@@ -583,6 +953,7 @@ export default function App() {
       setStemStatus('ready');
       setStemProgress(100);
       setStemStage('Drum stem isolated');
+      setCacheSource('computed');
 
       if (engineMode === 'webgpu-demucs') {
         setModelCached(true);
@@ -620,6 +991,7 @@ export default function App() {
           sampleRate: decodedDrum.sampleRate,
           duration: decodedDrum.duration,
         });
+        setHydratedFileKey(file.name);
       }
 
       setStemProgress(70);
@@ -635,6 +1007,8 @@ export default function App() {
         }
       }
 
+      customDrumPcmRef.current = extractDrumPcm(decodedDrum);
+      stemClearedRef.current = false;
       setDrumBuffer(decodedDrum);
       setSpectralCache(null);
       engine.setDrumBuffer(decodedDrum);
@@ -649,6 +1023,7 @@ export default function App() {
       setStemStatus('ready');
       setStemProgress(100);
       setStemStage('Imported drum stem ready');
+      setCacheSource('computed');
     } catch {
       setStemStatus('error');
       setStemError('Could not decode the imported drum stem audio file.');
@@ -658,13 +1033,8 @@ export default function App() {
   const handleDownloadDrumStem = () => {
     if (!drumBuffer) return;
     const blob = audioBufferToWavBlob(drumBuffer);
-    const url = URL.createObjectURL(blob);
     const baseName = (audioMeta?.fileName || 'track').replace(/\.[^/.]+$/, '');
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${baseName}_drums.wav`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, `${baseName}_drums.wav`);
   };
 
   const handleClearModelCache = async () => {
@@ -673,14 +1043,118 @@ export default function App() {
   };
 
   const handleResetDrums = () => {
+    cancelActiveSeparation();
+    customDrumPcmRef.current = null;
+    stemClearedRef.current = true;
     setDrumBuffer(null);
     setSpectralCache(null);
     engine.setDrumBuffer(null);
     setBandEnvelopes(null);
     setStemDiagnostics(null);
     setStemStatus('idle');
+    setStemProgress(0);
+    setStemStage('');
     setAuditionMode('mix');
+    setCacheSource('cleared');
+  };
+
+  const handleDownloadAnalysisCache = async () => {
+    if ((!bandEnvelopes && !spectralCache) || !audioMeta?.fileName) {
+      setProjectStatus({ type: 'error', text: 'No computed analysis cache available yet.' });
+      return;
+    }
+    try {
+      const blob = await encodeAnalysisCacheBlob({
+        fileName: audioMeta.fileName,
+        envelopes: bandEnvelopes,
+        spectralCache,
+        diagnostics: stemDiagnostics,
+      });
+      const baseName = audioMeta.fileName.replace(/\.[^/.]+$/, '');
+      triggerBlobDownload(blob, `${baseName}.stepsync.cache`);
+      setProjectStatus({ type: 'ok', text: `Saved ${baseName}.stepsync.cache` });
+    } catch {
+      setProjectStatus({ type: 'error', text: 'Failed to export .stepsync.cache file.' });
+    }
+  };
+
+  const handleImportAnalysisCache = async (file: File) => {
+    try {
+      const buf = await file.arrayBuffer();
+      const decoded = await decodeAnalysisCacheArrayBuffer(buf);
+      if (!decoded || !decoded.envelopes) {
+        setProjectStatus({ type: 'error', text: 'Invalid .stepsync.cache file.' });
+        return;
+      }
+      stemClearedRef.current = false;
+      setSpectralCache(decoded.spectralCache);
+      setBandEnvelopes(decoded.envelopes);
+      setStemDiagnostics(decoded.diagnostics);
+      setStemStatus('ready');
+      setStemProgress(100);
+      setStemStage(`Imported ${file.name}`);
+      setCacheSource('computed');
+      setProjectStatus({ type: 'ok', text: `Loaded ${file.name}` });
+    } catch {
+      setProjectStatus({ type: 'error', text: 'Failed to read .stepsync.cache file.' });
+    }
+  };
+
+  const handleDiscardMemoryClean = async () => {
+    cancelActiveSeparation();
+    const fileName = audioMeta?.fileName;
+    customDrumPcmRef.current = null;
+    stemClearedRef.current = true;
+    setDrumBuffer(null);
+    engine.setDrumBuffer(null);
+    setBandEnvelopes(null);
+    setSpectralCache(null);
+    setStemDiagnostics(null);
+    setStemStatus('idle');
+    setStemProgress(0);
+    setStemStage('');
+    setAuditionMode('mix');
+    setManualEdits({ suppressions: [], additions: [] });
+    setManualEditHistory([]);
+    setLaneRules(DEFAULT_LANE_RULES);
     setAudioMeta((prev) => (prev ? { ...prev, drumEvents: undefined } : null));
+    setCacheSource('cleared');
+    setProjectStatus({ type: 'ok', text: 'Memory discarded (clean start; auto-detect paused)' });
+
+    if (fileName) {
+      await deleteTrackFromStorageDb(fileName);
+    }
+  };
+
+  const handleDiscardAndRecalculate = async () => {
+    const fileName = audioMeta?.fileName;
+    stemClearedRef.current = false;
+    if (fileName) {
+      await deleteTrackFromStorageDb(fileName);
+    }
+
+    if (drumBuffer) {
+      setStemStatus('processing');
+      setStemProgress(50);
+      setStemStage('Recalculating drum envelopes & FFT spectrogram...');
+      const envelopes = analyzePreSeparatedDrumBuffer(drumBuffer);
+      setSpectralCache(null);
+      setBandEnvelopes(envelopes);
+      setSpectralBuildNonce((n) => n + 1);
+      setStemStatus('ready');
+      setStemProgress(100);
+      setStemStage('Recalculated from active drum stem');
+      setCacheSource('computed');
+      return;
+    }
+
+    if (fileName) {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const loaded = await tryAutoLoadCompanionDrumStem(fileName, audioCtx);
+      if (loaded) return;
+    }
+
+    await handleStartSeparation();
   };
 
   const handleUpdateLaneRule = (id: string, updates: Partial<DrumLaneRule>) => {
@@ -1015,13 +1489,8 @@ Follow the syntax format strictly:
   const handleDownloadProjectJson = () => {
     const json = generateProjectJson();
     const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
     const baseName = (audioMeta?.fileName || 'stepsync_project').replace(/\.[^/.]+$/, '');
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${baseName}.stepsync.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, `${baseName}.stepsync.json`);
     setProjectStatus({ type: 'ok', text: `Saved ${baseName}.stepsync.json` });
   };
 
@@ -1045,64 +1514,7 @@ Follow the syntax format strictly:
         return;
       }
 
-      if (typeof parsed.sync.bpm === 'number' && typeof parsed.sync.offset === 'number') {
-        setSync({
-          bpm: parsed.sync.bpm,
-          offset: parsed.sync.offset,
-          metronomeActive: Boolean(parsed.sync.metronomeActive),
-          volume: typeof parsed.sync.volume === 'number' ? parsed.sync.volume : 1.0,
-        });
-      }
-
-      setSections(parsed.sections);
-      if (parsed.difficultyMatrix) {
-        setDifficultyMatrix(parsed.difficultyMatrix);
-      }
-      setLaneRules(parsed.laneRules);
-      if (typeof parsed.quantizeDrums === 'boolean') setQuantizeDrums(parsed.quantizeDrums);
-      if (typeof parsed.delayCompensation === 'number') setDelayCompensation(parsed.delayCompensation);
-      if (
-        parsed.auditionMode === 'mix' ||
-        parsed.auditionMode === 'drums' ||
-        parsed.auditionMode === 'blend'
-      ) {
-        setAuditionMode(parsed.auditionMode);
-      }
-      if (typeof parsed.blendRatio === 'number') setBlendRatio(parsed.blendRatio);
-      if (
-        parsed.simulatorDifficulty === 'easy' ||
-        parsed.simulatorDifficulty === 'normal' ||
-        parsed.simulatorDifficulty === 'hard'
-      ) {
-        setSimulatorDifficulty(parsed.simulatorDifficulty);
-      }
-      if (
-        parsed.simSoundMode === 'demo' ||
-        parsed.simSoundMode === 'sync' ||
-        parsed.simSoundMode === 'input'
-      ) {
-        setSimSoundMode(parsed.simSoundMode);
-      }
-      if (parsed.simSoundEnabled) {
-        setSimSoundEnabled({
-          kick: Boolean(parsed.simSoundEnabled.kick),
-          snare: Boolean(parsed.simSoundEnabled.snare),
-          hat: Boolean(parsed.simSoundEnabled.hat),
-          tom: Boolean(parsed.simSoundEnabled.tom),
-        });
-      }
-      if (typeof parsed.simVolume === 'number') setSimVolume(parsed.simVolume);
-
-      if (
-        parsed.manualEdits &&
-        Array.isArray(parsed.manualEdits.suppressions) &&
-        Array.isArray(parsed.manualEdits.additions)
-      ) {
-        setManualEdits(parsed.manualEdits);
-      } else {
-        setManualEdits({ suppressions: [], additions: [] });
-      }
-      setManualEditHistory([]);
+      applyProjectSettings(parsed);
 
       if (!bandEnvelopes && Array.isArray(parsed.drumEvents)) {
         const restoredEvents = parsed.drumEvents;
@@ -1134,6 +1546,48 @@ Follow the syntax format strictly:
       setProjectStatus({ type: 'error', text: 'Failed to parse StepSync project JSON.' });
     }
   };
+
+  // Persist track project + cached envelopes/spectral spectrogram to IndexedDB after hydration
+  useEffect(() => {
+    if (!audioMeta?.fileName || hydratedFileKey !== audioMeta.fileName) return;
+
+    const timer = window.setTimeout(() => {
+      saveTrackToStorageDb({
+        fileName: audioMeta.fileName,
+        updatedAt: new Date().toISOString(),
+        source:
+          cacheSource === 'public' || cacheSource === 'indexeddb' ? cacheSource : 'computed',
+        project: buildProjectPayload(),
+        envelopes: bandEnvelopes,
+        spectralCache,
+        diagnostics: stemDiagnostics,
+        drumPcm: customDrumPcmRef.current,
+        stemCleared: stemClearedRef.current,
+      });
+    }, 600);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    hydratedFileKey,
+    audioMeta,
+    sync,
+    sections,
+    difficultyMatrix,
+    laneRules,
+    quantizeDrums,
+    delayCompensation,
+    auditionMode,
+    blendRatio,
+    simulatorDifficulty,
+    simSoundMode,
+    simSoundEnabled,
+    simVolume,
+    manualEdits,
+    bandEnvelopes,
+    spectralCache,
+    stemDiagnostics,
+    cacheSource,
+  ]);
 
   const handleLoadEvents = (eventsData: any[]) => {
     if (!audioMeta) return;
@@ -1195,13 +1649,13 @@ Follow the syntax format strictly:
   }, [rawEvents, autoQuantize, delayCompensation, sync.bpm, sync.offset, bandEnvelopes]);
 
   return (
-    <div className="min-h-screen bg-gray-950 text-gray-100 font-sans p-3 md:p-4">
-      <div className="max-w-5xl mx-auto space-y-2.5">
+    <div className="min-h-screen bg-[#0b0c0e] text-gray-100 font-sans p-2 md:p-3">
+      <div className="max-w-7xl mx-auto space-y-2">
         {/* Header */}
-        <header className="flex flex-wrap md:flex-nowrap items-center justify-between gap-3 border-b border-gray-800 pb-2.5">
-          <div className="flex items-center gap-2.5 shrink-0">
-            <Activity className="w-6 h-6 text-emerald-400 shrink-0" />
-            <h1 className="text-xl font-semibold tracking-tight whitespace-nowrap">StepSync</h1>
+        <header className="flex flex-wrap items-center justify-between gap-2 pb-0.5">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Activity className="w-5 h-5 text-emerald-400 shrink-0" />
+            <h1 className="text-base font-semibold tracking-tight whitespace-nowrap">StepSync</h1>
           </div>
 
           <GlobalTransport
@@ -1214,31 +1668,53 @@ Follow the syntax format strictly:
             onToggleLoop={() => setIsLooping((l) => !l)}
           />
 
-          <div className="flex space-x-1.5 bg-gray-900 rounded-lg p-1 border border-gray-800 shadow-sm shrink-0">
-            <button
-              onClick={() => setActiveTab('editor')}
-              className={cn(
-                'px-3.5 py-1.5 text-sm font-medium rounded-md flex items-center space-x-1.5 transition-colors whitespace-nowrap shrink-0',
-                activeTab === 'editor' ? 'bg-gray-800 text-white shadow-sm' : 'text-gray-400 hover:text-white'
-              )}
+          <div className="flex items-center gap-2 shrink-0">
+            <label
+              className="inline-flex items-center gap-1.5 text-xs text-gray-400 whitespace-nowrap"
+              title="Adjust global text size across the entire interface (min 18px–28px root scale)"
             >
-              <Settings2 className="w-4 h-4" />
-              <span>Editor</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('simulate')}
-              className={cn(
-                'px-3.5 py-1.5 text-sm font-medium rounded-md flex items-center space-x-1.5 transition-colors whitespace-nowrap shrink-0',
-                activeTab === 'simulate' ? 'bg-gray-800 text-emerald-400 shadow-sm' : 'text-gray-400 hover:text-emerald-400'
-              )}
-            >
-              <Gamepad2 className="w-4 h-4" />
-              <span>Simulate</span>
-            </button>
+              <span className="font-medium text-gray-300">Size</span>
+              <input
+                type="range"
+                min={18}
+                max={28}
+                step={1}
+                value={rootFontPx}
+                onChange={(e) => setRootFontPx(parseInt(e.target.value, 10))}
+                aria-label="Global text size"
+                className="w-16 accent-emerald-400 cursor-pointer"
+              />
+              <span className="font-mono tabular-nums text-emerald-400 w-9 text-right">
+                {Math.round(rootFontPx * 0.75)}px+
+              </span>
+            </label>
+
+            <div className="inline-flex items-center gap-0.5 shrink-0">
+              <button
+                onClick={() => setActiveTab('editor')}
+                className={cn(
+                  'px-2 py-0.5 text-xs font-medium rounded-sm flex items-center gap-1 transition-colors whitespace-nowrap shrink-0',
+                  activeTab === 'editor' ? 'bg-white/10 text-white' : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+                )}
+              >
+                <Settings2 className="w-3.5 h-3.5" />
+                <span>Editor</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('simulate')}
+                className={cn(
+                  'px-2 py-0.5 text-xs font-medium rounded-sm flex items-center gap-1 transition-colors whitespace-nowrap shrink-0',
+                  activeTab === 'simulate' ? 'bg-white/10 text-emerald-400' : 'text-gray-400 hover:text-emerald-400 hover:bg-white/[0.06]'
+                )}
+              >
+                <Gamepad2 className="w-3.5 h-3.5" />
+                <span>Simulate</span>
+              </button>
+            </div>
           </div>
         </header>
 
-        {/* Global Real-Time Frequency Spectrum Analyzer (visible across all tabs) */}
+        {/* Global Real-Time Frequency Spectrum Analyzer (collapsed by default) */}
         <SpectrumVisualizer
           isPlaying={isPlaying}
           hasAudio={Boolean(engine.getBuffer())}
@@ -1247,15 +1723,15 @@ Follow the syntax format strictly:
         />
 
         {activeTab === 'editor' ? (
-          <div className="space-y-2.5">
+          <div className="space-y-2">
             {/* Waveform + Static Grid Alignment (or Drag & Drop Upload when empty / dragging a file) */}
             {!engine.getBuffer() || isDraggingAudio ? (
               <div
                 className={cn(
-                  'relative border-2 border-dashed rounded-xl p-6 transition-colors flex flex-col items-center justify-center text-center',
+                  'relative border border-dashed rounded-md p-4 transition-colors flex flex-col items-center justify-center text-center',
                   isDraggingAudio
                     ? 'border-emerald-400 bg-emerald-500/10'
-                    : 'border-gray-800 hover:border-gray-600 bg-gray-900/50'
+                    : 'border-gray-800 hover:border-gray-600'
                 )}
               >
                 <input
@@ -1264,21 +1740,21 @@ Follow the syntax format strictly:
                   onChange={handleFileUpload}
                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                 />
-                <Upload className={cn('w-8 h-8 mb-2', isDraggingAudio ? 'text-emerald-400' : 'text-gray-500')} />
+                <Upload className={cn('w-7 h-7 mb-1.5', isDraggingAudio ? 'text-emerald-400' : 'text-gray-500')} />
                 <p className="text-sm font-medium">
                   {isDraggingAudio ? 'Drop Audio File to Load' : 'Drag & Drop Audio File Here or Click to Browse'}
                 </p>
-                <p className="text-xs text-gray-500 mt-1">Supported formats: .mp3, .wav, .ogg, .m4a</p>
+                <p className="text-xs text-gray-500 mt-0.5">Supported: .mp3, .wav, .ogg, .m4a</p>
                 {uploadError && (
-                  <div className="mt-2 flex items-center gap-2 text-xs text-red-400">
-                    <AlertCircle className="w-4 h-4" />
+                  <div className="mt-1.5 flex items-center gap-1.5 text-xs text-red-400">
+                    <AlertCircle className="w-3.5 h-3.5" />
                     <span>{uploadError}</span>
                   </div>
                 )}
               </div>
             ) : (
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 flex flex-col space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex flex-col space-y-1">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                   <div className="flex items-center gap-2 font-mono tabular-nums text-emerald-400 truncate">
                     <span>
                       {audioMeta?.fileName || 'Loaded Audio'} ·{' '}
@@ -1304,18 +1780,18 @@ Follow the syntax format strictly:
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="inline-flex items-center gap-0.5 shrink-0">
                     <button
                       type="button"
                       onClick={handleDownloadProjectJson}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm hover:bg-white/[0.06] text-gray-300 hover:text-white transition-colors whitespace-nowrap shrink-0"
                       title="Export full StepSync project JSON (sync, sections, matrix, lanes, manual edits)"
                     >
                       <Download className="w-3 h-3" />
                       <span>Save JSON</span>
                     </button>
                     <label
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer transition-colors whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm hover:bg-white/[0.06] text-gray-300 hover:text-white cursor-pointer transition-colors whitespace-nowrap shrink-0"
                       title="Import a saved .stepsync.json project file"
                     >
                       <FolderOpen className="w-3 h-3" />
@@ -1327,7 +1803,7 @@ Follow the syntax format strictly:
                         className="hidden"
                       />
                     </label>
-                    <label className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                    <label className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm hover:bg-white/[0.06] text-gray-300 hover:text-white cursor-pointer transition-colors whitespace-nowrap shrink-0">
                       <Upload className="w-3 h-3" />
                       <span>Change Audio</span>
                       <input
@@ -1405,452 +1881,696 @@ Follow the syntax format strictly:
               onDownloadDrumStem={handleDownloadDrumStem}
               onClearModelCache={handleClearModelCache}
               onResetDrums={handleResetDrums}
+              hasCachedAnalysis={Boolean(bandEnvelopes)}
+              cacheSource={cacheSource}
+              onDownloadAnalysisCache={handleDownloadAnalysisCache}
+              onImportAnalysisCache={handleImportAnalysisCache}
+              onDiscardMemoryClean={handleDiscardMemoryClean}
+              onDiscardAndRecalculate={handleDiscardAndRecalculate}
             />
 
-            {/* Analysis Results & Sync */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                <h2 className="text-sm font-medium text-gray-400 mb-3 tracking-wider uppercase">Sync Parameters</h2>
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-xs text-gray-500 uppercase tracking-wider block mb-1.5">BPM</label>
-                    <div className="flex space-x-2">
-                      <input
-                        type="number"
-                        value={sync.bpm}
-                        onChange={(e) => setSync((s) => ({ ...s, bpm: parseFloat(e.target.value) || 0 }))}
-                        className="bg-gray-950 border border-gray-800 rounded-lg px-3 py-1.5 w-full text-lg font-mono tabular-nums text-emerald-400 focus:outline-none focus:border-emerald-500 transition-colors"
-                      />
-                      <button
-                        onClick={() => setSync((s) => ({ ...s, bpm: Number((s.bpm / 2).toFixed(2)) }))}
-                        className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm font-medium transition-colors"
-                      >
-                        /2
-                      </button>
-                      <button
-                        onClick={() => setSync((s) => ({ ...s, bpm: Number((s.bpm * 2).toFixed(2)) }))}
-                        className="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm font-medium transition-colors"
-                      >
-                        *2
-                      </button>
-                    </div>
-                  </div>
+            {/* Collapsible Sync & Timing Bar (collapsed by default) */}
+            <section>
+              <div className="flex flex-wrap items-center justify-between gap-2 py-0.5">
+                <button
+                  type="button"
+                  onClick={() => setSyncPanelOpen((v) => !v)}
+                  aria-expanded={syncPanelOpen}
+                  className="flex items-center gap-2 min-w-0 flex-1 text-left text-xs hover:text-white transition-colors"
+                >
+                  <span className="font-semibold uppercase tracking-wider text-gray-200 whitespace-nowrap">
+                    Sync & Timing
+                  </span>
+                  <span className="font-mono tabular-nums text-emerald-400 truncate">
+                    {sync.bpm.toFixed(2)} BPM · {sync.offset.toFixed(3)}s
+                  </span>
+                </button>
 
-                  <div>
-                    <label className="text-xs text-gray-500 uppercase tracking-wider block mb-1.5">Offset (Seconds)</label>
-                    <div className="flex space-x-2">
+                <div className="inline-flex items-center gap-0.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleTap}
+                    className="px-1.5 py-0.5 text-xs rounded-sm hover:bg-white/[0.06] text-gray-300 transition-colors whitespace-nowrap"
+                    title="Tap Tempo (T)"
+                  >
+                    Tap (T)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSync((s) => ({ ...s, metronomeActive: !s.metronomeActive }))}
+                    className={cn(
+                      'inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap',
+                      sync.metronomeActive
+                        ? 'bg-emerald-500/20 text-emerald-300'
+                        : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                    )}
+                    title="Toggle Metronome (M)"
+                  >
+                    {sync.metronomeActive ? <Volume2 className="w-3 h-3" /> : <VolumeX className="w-3 h-3" />}
+                    <span>Metronome {sync.metronomeActive ? 'ON' : 'OFF'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSyncPanelOpen((v) => !v)}
+                    aria-expanded={syncPanelOpen}
+                    className="p-0.5 rounded-sm text-gray-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+                    title={syncPanelOpen ? 'Collapse Sync Parameters' : 'Expand Sync Parameters'}
+                  >
+                    {syncPanelOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              {syncPanelOpen && (() => {
+                const gridDuration = audioMeta?.duration || 180;
+                const getGridBeatCount = (offset: number, bpm: number, dur: number) => {
+                  if (bpm <= 0) return 4;
+                  const beatDur = 60 / bpm;
+                  const maxBeats = Math.floor((dur - offset) / beatDur);
+                  return Math.max(4, Math.floor(maxBeats / 4) * 4);
+                };
+                const gridBeatCount = getGridBeatCount(sync.offset, sync.bpm, gridDuration);
+                const safeBeatDur = sync.bpm > 0 ? 60 / sync.bpm : 0.5;
+                const startMarkerTime = Number(sync.offset.toFixed(3));
+                const endMarkerTime = Number((sync.offset + gridBeatCount * safeBeatDur).toFixed(3));
+
+                const commitEndMarker = (rawStr: string, keepFocus = false) => {
+                  const parsed = parseFloat(rawStr);
+                  const lockedN = endFocusLockedNRef.current ?? gridBeatCount;
+                  if (Number.isFinite(parsed) && lockedN > 0) {
+                    const beatDur = (parsed - sync.offset) / lockedN;
+                    if (beatDur > 0.1) {
+                      const newBpm = Math.max(20, Math.min(400, 60 / beatDur));
+                      setSync((s) => ({ ...s, bpm: Number(newBpm.toFixed(2)) }));
+                    }
+                  }
+                  if (!keepFocus) {
+                    setEndFocused(false);
+                    endFocusLockedNRef.current = null;
+                  }
+                };
+
+                return (
+                  <div className="pt-1 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <div className="flex items-center gap-1.5 flex-[1.35] min-w-[11rem]">
+                      <label className="text-xs text-gray-400 uppercase tracking-wider shrink-0">BPM</label>
+                      <div className="flex flex-1 items-center gap-1 min-w-0">
+                        <input
+                          type="number"
+                          value={sync.bpm}
+                          onChange={(e) => setSync((s) => ({ ...s, bpm: parseFloat(e.target.value) || 0 }))}
+                          className="bg-black ring-1 ring-white/25 hover:ring-white/45 focus:ring-2 focus:ring-emerald-400 rounded-sm px-2 py-0.5 w-full min-w-[4.5rem] text-sm font-mono tabular-nums text-emerald-400 focus:outline-none"
+                        />
+                        <button
+                          onClick={() => setSync((s) => ({ ...s, bpm: Number((s.bpm / 2).toFixed(2)) }))}
+                          className="px-1.5 py-0.5 rounded-sm hover:bg-white/[0.06] text-xs font-medium text-gray-300 transition-colors shrink-0"
+                        >
+                          /2
+                        </button>
+                        <button
+                          onClick={() => setSync((s) => ({ ...s, bpm: Number((s.bpm * 2).toFixed(2)) }))}
+                          className="px-1.5 py-0.5 rounded-sm hover:bg-white/[0.06] text-xs font-medium text-gray-300 transition-colors shrink-0"
+                        >
+                          *2
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 flex-1 min-w-[8.5rem]">
+                      <label className="text-xs text-gray-400 uppercase tracking-wider shrink-0">Offset</label>
                       <input
                         type="number"
                         step="0.005"
                         value={sync.offset}
                         onChange={(e) => setSync((s) => ({ ...s, offset: parseFloat(e.target.value) || 0 }))}
-                        className="bg-gray-950 border border-gray-800 rounded-lg px-3 py-1.5 w-full text-lg font-mono tabular-nums focus:outline-none focus:border-emerald-500 transition-colors"
+                        className="bg-black ring-1 ring-white/25 hover:ring-white/45 focus:ring-2 focus:ring-emerald-400 rounded-sm px-2 py-0.5 w-full min-w-[4.5rem] text-sm font-mono tabular-nums text-white focus:outline-none"
+                        title="Shifts Beat 0 (Start) and End together in seconds"
                       />
                     </div>
-                  </div>
-                </div>
-              </div>
 
-              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-                <h2 className="text-sm font-medium text-gray-400 mb-3 tracking-wider uppercase">Tools</h2>
-                <div className="space-y-3">
-                  <button
-                    onClick={handleTap}
-                    className="w-full py-3 border-2 border-dashed border-gray-700 hover:border-gray-500 rounded-lg text-gray-300 font-medium transition-colors focus:outline-none active:bg-gray-800"
-                  >
-                    Tap Tempo (T)
-                  </button>
-
-                  <button
-                    onClick={() => setSync((s) => ({ ...s, metronomeActive: !s.metronomeActive }))}
-                    className={cn(
-                      'w-full py-3 rounded-lg font-medium transition-colors flex items-center justify-center space-x-2 shadow-sm',
-                      sync.metronomeActive
-                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/50'
-                        : 'bg-gray-800 text-gray-300 border border-transparent hover:bg-gray-700'
-                    )}
-                  >
-                    {sync.metronomeActive ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
-                    <span>Metronome {sync.metronomeActive ? 'ON' : 'OFF'} (M)</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Song Structure & Difficulty Planning */}
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-sm font-medium text-gray-400 tracking-wider uppercase">
-                  Song Structure & Sections
-                </h2>
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="inline-flex items-center p-0.5 bg-gray-950 border border-gray-800 rounded-md">
-                    <button
-                      type="button"
-                      onClick={() => setSectionMetricMode('avg')}
-                      className={cn(
-                        'px-2 py-1 text-xs font-mono font-medium rounded transition-colors whitespace-nowrap shrink-0',
-                        sectionMetricMode === 'avg'
-                          ? 'bg-emerald-500/20 text-emerald-300'
-                          : 'text-gray-400 hover:text-gray-200'
-                      )}
-                      title="Average inputs per beat in each section"
-                    >
-                      AVG
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSectionMetricMode('cnt')}
-                      className={cn(
-                        'px-2 py-1 text-xs font-mono font-medium rounded transition-colors whitespace-nowrap shrink-0',
-                        sectionMetricMode === 'cnt'
-                          ? 'bg-emerald-500/20 text-emerald-300'
-                          : 'text-gray-400 hover:text-gray-200'
-                      )}
-                      title="Total input count in each section"
-                    >
-                      CNT
-                    </button>
-                  </div>
-
-                  <select
-                    value={activeSectionLaneFilter}
-                    onChange={(e) => setSectionLaneFilter(e.target.value)}
-                    className="bg-gray-950 border border-gray-800 rounded-md px-2.5 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                    title="Filter Easy / Normal / Hard input totals by lane or arrow key"
-                  >
-                    <option value="all">All lanes</option>
-                    <optgroup label="Arrow Keys">
-                      <option value="lane:0">Key D (Left)</option>
-                      <option value="lane:1">Key F (Down)</option>
-                      <option value="lane:2">Key J (Up)</option>
-                      <option value="lane:3">Key K (Right)</option>
-                    </optgroup>
-                    <optgroup label="Instrument Lanes">
-                      {laneRules.map((rule) => (
-                        <option key={rule.id} value={`band:${rule.id}`}>
-                          {rule.name}
-                          {rule.enabled ? '' : ' (Off)'}
-                        </option>
-                      ))}
-                    </optgroup>
-                  </select>
-                  <button
-                    onClick={addSection}
-                    className="flex items-center space-x-1 text-sm text-emerald-400 hover:text-emerald-300 transition-colors bg-emerald-500/10 px-3 py-1 rounded-md border border-emerald-500/20 whitespace-nowrap shrink-0"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Add Section</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Difficulty x Density Subdivision & Chord Cap Table */}
-              <div className="border border-gray-800 rounded-lg bg-gray-950/60 overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-800 text-xs text-gray-400">
-                  <span>Difficulty × Density Matrix (Grid Cap + Simultaneous Chord Cap by Lane Priority)</span>
-                  <button
-                    type="button"
-                    onClick={() => setDifficultyMatrix(DEFAULT_DIFFICULTY_MATRIX)}
-                    className="text-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap shrink-0"
-                  >
-                    Reset Matrix
-                  </button>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-gray-800/80 text-gray-400">
-                        <th className="text-left font-medium px-3 py-1.5 w-24">Density</th>
-                        <th className="text-center font-medium px-2 py-1.5 text-sky-300">
-                          Easy <span className="text-[10px] font-normal text-gray-500">(Grid · Chords)</span>
-                        </th>
-                        <th className="text-center font-medium px-2 py-1.5 text-amber-300">
-                          Normal <span className="text-[10px] font-normal text-gray-500">(Grid · Chords)</span>
-                        </th>
-                        <th className="text-center font-medium px-2 py-1.5 text-emerald-400">
-                          Hard <span className="text-[10px] font-normal text-gray-500">(Grid · Chords)</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-800/60">
-                      {(['Sparse', 'Medium', 'Dense'] as SectionDensity[]).map((densityRow) => (
-                        <tr key={densityRow} className="hover:bg-gray-900/40">
-                          <td className="px-3 py-1.5 font-medium text-gray-300">{densityRow}</td>
-                          {(['easy', 'normal', 'hard'] as ChartDifficulty[]).map((diffCol) => {
-                            const cell = difficultyMatrix[densityRow][diffCol];
-                            return (
-                              <td key={diffCol} className="px-2 py-1 text-center">
-                                <div className="inline-flex items-center gap-1">
-                                  <select
-                                    value={String(cell.subdivision)}
-                                    onChange={(e) => {
-                                      const rawVal = e.target.value;
-                                      const parsed: DensitySubdivisionCap =
-                                        rawVal === 'all'
-                                          ? 'all'
-                                          : (Number(rawVal) as DensitySubdivisionCap);
-                                      setDifficultyMatrix((prev) => ({
-                                        ...prev,
-                                        [densityRow]: {
-                                          ...prev[densityRow],
-                                          [diffCol]: {
-                                            ...prev[densityRow][diffCol],
-                                            subdivision: parsed,
-                                          },
-                                        },
-                                      }));
-                                    }}
-                                    className="bg-gray-900 border border-gray-800 rounded px-1.5 py-1 text-xs font-mono tabular-nums text-gray-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                                    title="Maximum note subdivision grid allowed"
-                                  >
-                                    <option value="0">Off (0)</option>
-                                    <option value="1">1/1</option>
-                                    <option value="2">1/2</option>
-                                    <option value="4">1/4</option>
-                                    <option value="8">1/8</option>
-                                    <option value="16">1/16</option>
-                                    <option value="all">All</option>
-                                  </select>
-                                  <select
-                                    value={cell.maxChords === null ? 'all' : String(cell.maxChords)}
-                                    onChange={(e) => {
-                                      const rawVal = e.target.value;
-                                      const parsed: MaxChordsCap =
-                                        rawVal === 'all'
-                                          ? null
-                                          : (Number(rawVal) as Exclude<MaxChordsCap, null>);
-                                      setDifficultyMatrix((prev) => ({
-                                        ...prev,
-                                        [densityRow]: {
-                                          ...prev[densityRow],
-                                          [diffCol]: {
-                                            ...prev[densityRow][diffCol],
-                                            maxChords: parsed,
-                                          },
-                                        },
-                                      }));
-                                    }}
-                                    className="bg-gray-900 border border-gray-800 rounded px-1.5 py-1 text-xs font-mono tabular-nums text-gray-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                                    title="Max simultaneous notes (Chords) kept by Lane Manager priority: 1 = Single (no jumps), 2 = Jump, 3 = Hand"
-                                  >
-                                    <option value="1">1 · Single</option>
-                                    <option value="2">2 · Jump</option>
-                                    <option value="3">3 · Hand</option>
-                                    <option value="all">All Chords</option>
-                                  </select>
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Section Rows with Easy | Normal | Hard AVG or CNT */}
-              <div className="space-y-1.5">
-                {sections.length > 0 && (
-                  <div className="hidden md:grid md:grid-cols-[2.25rem_5.5rem_1fr_7.5rem_4.25rem_4.25rem_4.25rem_2rem] gap-2.5 items-center px-3 py-1 text-[11px] font-medium uppercase tracking-wider text-gray-500">
-                    <span className="text-right">#</span>
-                    <span>Beat</span>
-                    <span>Type</span>
-                    <span>Density</span>
-                    <span className="text-right text-sky-400">
-                      Easy{sectionMetricMode === 'avg' ? '/b' : ''}
-                    </span>
-                    <span className="text-right text-amber-400">
-                      Normal{sectionMetricMode === 'avg' ? '/b' : ''}
-                    </span>
-                    <span className="text-right text-emerald-400">
-                      Hard{sectionMetricMode === 'avg' ? '/b' : ''}
-                    </span>
-                    <span />
-                  </div>
-                )}
-
-                {sections.map((section, idx) => {
-                  const stats = sectionDifficultyCounts.bySectionId[section.id] || {
-                    easy: { count: 0, avg: 0 },
-                    normal: { count: 0, avg: 0 },
-                    hard: { count: 0, avg: 0 },
-                    beats: 0,
-                  };
-                  const formatMetric = (m: { count: number; avg: number }) =>
-                    sectionMetricMode === 'avg' ? m.avg.toFixed(2) : String(m.count);
-                  return (
-                    <div
-                      key={section.id}
-                      className="grid grid-cols-1 md:grid-cols-[2.25rem_5.5rem_1fr_7.5rem_4.25rem_4.25rem_4.25rem_2rem] gap-2.5 items-center bg-gray-950 px-3 py-1.5 rounded-lg border border-gray-800"
-                    >
-                      <div className="hidden md:block text-xs font-mono tabular-nums text-gray-500 text-right">
-                        #{idx + 1}
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="md:hidden text-xs text-gray-500 w-14">Beat</span>
+                    <div className="flex items-center gap-1.5 flex-1 min-w-[8.5rem]">
+                      <label
+                        className="text-xs text-emerald-400 uppercase tracking-wider shrink-0 font-semibold"
+                        title="Green Start marker position in seconds (equals Offset)"
+                      >
+                        Start
+                      </label>
+                      <div className="flex flex-1 items-center gap-1 min-w-0">
                         <input
                           type="number"
-                          step="1"
-                          value={section.beat}
-                          onChange={(e) =>
-                            updateSection(section.id, { beat: parseFloat(e.target.value) || 0 })
-                          }
-                          title={`${stats.beats.toFixed(0)} beats in this section`}
-                          className="bg-gray-900 border border-gray-800 rounded px-2 py-1 w-full text-sm font-mono tabular-nums focus:outline-none focus:border-emerald-500 transition-colors"
+                          step="0.005"
+                          value={startFocused ? startDraft : startMarkerTime.toFixed(3)}
+                          onFocus={() => {
+                            setStartDraft(startMarkerTime.toFixed(3));
+                            setStartFocused(true);
+                          }}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setStartDraft(val);
+                            const parsed = parseFloat(val);
+                            if (
+                              Number.isFinite(parsed) &&
+                              !val.endsWith('.') &&
+                              !val.endsWith('-') &&
+                              val.trim() !== ''
+                            ) {
+                              setSync((s) => ({ ...s, offset: Number(parsed.toFixed(3)) }));
+                            }
+                          }}
+                          onBlur={() => {
+                            const parsed = parseFloat(startDraft);
+                            if (Number.isFinite(parsed)) {
+                              setSync((s) => ({ ...s, offset: Number(parsed.toFixed(3)) }));
+                            }
+                            setStartFocused(false);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              (e.currentTarget as HTMLInputElement).blur();
+                            } else if (e.key === 'Escape') {
+                              setStartFocused(false);
+                              (e.currentTarget as HTMLInputElement).blur();
+                            }
+                          }}
+                          className="bg-black ring-1 ring-white/25 hover:ring-white/45 focus:ring-2 focus:ring-emerald-400 rounded-sm px-2 py-0.5 w-full min-w-[4.5rem] text-sm font-mono tabular-nums text-emerald-300 focus:outline-none"
+                          title="Green Start marker (seconds). Matches Offset and shifts End at the same time."
                         />
+                        <span className="text-xs font-mono text-gray-500 shrink-0">s</span>
                       </div>
+                    </div>
 
-                      <div className="flex items-center gap-2">
-                        <span className="md:hidden text-xs text-gray-500 w-14">Type</span>
+                    <div className="flex items-center gap-1.5 flex-1 min-w-[8.5rem]">
+                      <label
+                        className="text-xs text-red-400 uppercase tracking-wider shrink-0 font-semibold"
+                        title={`Red End marker position in seconds (beat ${gridBeatCount})`}
+                      >
+                        End
+                      </label>
+                      <div className="flex flex-1 items-center gap-1 min-w-0">
                         <input
-                          type="text"
-                          value={section.label}
-                          onChange={(e) => updateSection(section.id, { label: e.target.value })}
-                          className="bg-gray-900 border border-gray-800 rounded px-2 py-1 w-full text-sm focus:outline-none focus:border-emerald-500 transition-colors"
+                          type="number"
+                          step="0.01"
+                          value={endFocused ? endDraft : endMarkerTime.toFixed(3)}
+                          onFocus={() => {
+                            endFocusLockedNRef.current = gridBeatCount;
+                            setEndDraft(endMarkerTime.toFixed(3));
+                            setEndFocused(true);
+                          }}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setEndDraft(val);
+                            const inputType = (e.nativeEvent as InputEvent | undefined)?.inputType;
+                            const isTyped =
+                              inputType === 'insertText' ||
+                              inputType === 'deleteContentBackward' ||
+                              inputType === 'deleteContentForward' ||
+                              inputType === 'insertFromPaste' ||
+                              inputType === 'deleteByCut';
+                            if (!isTyped) {
+                              commitEndMarker(val, true);
+                            }
+                          }}
+                          onBlur={() => commitEndMarker(endDraft, false)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              commitEndMarker(endDraft, false);
+                              (e.currentTarget as HTMLInputElement).blur();
+                            } else if (e.key === 'Escape') {
+                              setEndFocused(false);
+                              endFocusLockedNRef.current = null;
+                              (e.currentTarget as HTMLInputElement).blur();
+                            }
+                          }}
+                          className="bg-black ring-1 ring-white/25 hover:ring-white/45 focus:ring-2 focus:ring-emerald-400 rounded-sm px-2 py-0.5 w-full min-w-[4.5rem] text-sm font-mono tabular-nums text-red-300 focus:outline-none"
+                          title={`Red End marker (seconds, beat ${gridBeatCount}). Changing Offset shifts this; editing End scales BPM.`}
                         />
+                        <span className="text-xs font-mono text-gray-500 shrink-0">s</span>
                       </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </section>
 
-                      <div className="flex items-center gap-2">
-                        <span className="md:hidden text-xs text-gray-500 w-14">Density</span>
-                        <select
-                          value={section.density}
-                          onChange={(e) =>
-                            updateSection(section.id, { density: e.target.value as SectionDensity })
-                          }
-                          className="bg-gray-900 border border-gray-800 rounded px-2 py-1 w-full text-sm focus:outline-none focus:border-emerald-500 transition-colors"
-                        >
-                          <option value="Sparse">Sparse</option>
-                          <option value="Medium">Medium</option>
-                          <option value="Dense">Dense</option>
-                        </select>
-                      </div>
+            {/* Collapsible Song Structure & Difficulty Planning (collapsed by default) */}
+            <section>
+              <div className="flex flex-wrap items-center justify-between gap-2 py-0.5">
+                <button
+                  type="button"
+                  onClick={() => setSectionsPanelOpen((v) => !v)}
+                  aria-expanded={sectionsPanelOpen}
+                  className="flex flex-wrap items-center gap-2 min-w-0 flex-1 text-left text-xs hover:text-white transition-colors"
+                >
+                  <span className="font-semibold uppercase tracking-wider text-gray-200 whitespace-nowrap">
+                    Sections & Difficulty
+                  </span>
+                  <span className="font-mono tabular-nums text-gray-400 truncate">
+                    {sections.length} {sections.length === 1 ? 'section' : 'sections'}
+                    {sections.length > 0 && (
+                      <>
+                        {' · '}
+                        <span className="text-sky-300">
+                          E {sectionMetricMode === 'avg' ? sectionDifficultyCounts.totals.easy.avg.toFixed(2) : sectionDifficultyCounts.totals.easy.count}
+                        </span>
+                        {' · '}
+                        <span className="text-amber-300">
+                          N {sectionMetricMode === 'avg' ? sectionDifficultyCounts.totals.normal.avg.toFixed(2) : sectionDifficultyCounts.totals.normal.count}
+                        </span>
+                        {' · '}
+                        <span className="text-emerald-400">
+                          H {sectionMetricMode === 'avg' ? sectionDifficultyCounts.totals.hard.avg.toFixed(2) : sectionDifficultyCounts.totals.hard.count}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                </button>
 
-                      <div
-                        className="flex items-center justify-between md:justify-end gap-2 font-mono tabular-nums text-xs"
-                        title={`${stats.easy.count} inputs across ${stats.beats.toFixed(0)} beats`}
+                <div className="inline-flex items-center gap-0.5 shrink-0">
+                  {sectionsPanelOpen && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setSectionMetricMode('avg')}
+                        className={cn(
+                          'px-1.5 py-0.5 text-xs font-mono rounded-sm transition-colors whitespace-nowrap',
+                          sectionMetricMode === 'avg'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                        )}
+                        title="Average inputs per beat in each section"
                       >
-                        <span className="md:hidden text-sky-400">Easy</span>
-                        <span className="text-sky-300 font-medium">{formatMetric(stats.easy)}</span>
-                      </div>
-
-                      <div
-                        className="flex items-center justify-between md:justify-end gap-2 font-mono tabular-nums text-xs"
-                        title={`${stats.normal.count} inputs across ${stats.beats.toFixed(0)} beats`}
+                        AVG
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSectionMetricMode('cnt')}
+                        className={cn(
+                          'px-1.5 py-0.5 text-xs font-mono rounded-sm transition-colors whitespace-nowrap',
+                          sectionMetricMode === 'cnt'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                        )}
+                        title="Total input count in each section"
                       >
-                        <span className="md:hidden text-amber-400">Normal</span>
-                        <span className="text-amber-300 font-medium">{formatMetric(stats.normal)}</span>
-                      </div>
+                        CNT
+                      </button>
 
-                      <div
-                        className="flex items-center justify-between md:justify-end gap-2 font-mono tabular-nums text-xs"
-                        title={`${stats.hard.count} inputs across ${stats.beats.toFixed(0)} beats`}
+                      <select
+                        value={activeSectionLaneFilter}
+                        onChange={(e) => setSectionLaneFilter(e.target.value)}
+                        className="bg-transparent hover:bg-white/[0.06] rounded-sm px-1.5 py-0.5 text-xs text-gray-200 focus:outline-none cursor-pointer"
+                        title="Filter Easy / Normal / Hard input totals by lane or arrow key"
                       >
-                        <span className="md:hidden text-emerald-400">Hard</span>
-                        <span className="text-emerald-400 font-medium">{formatMetric(stats.hard)}</span>
-                      </div>
+                        <option value="all" className="bg-gray-950 text-gray-200">All lanes</option>
+                        <optgroup label="Arrow Keys" className="bg-gray-950 text-gray-200">
+                          <option value="lane:0">Key D (Left)</option>
+                          <option value="lane:1">Key F (Down)</option>
+                          <option value="lane:2">Key J (Up)</option>
+                          <option value="lane:3">Key K (Right)</option>
+                        </optgroup>
+                        <optgroup label="Instrument Lanes" className="bg-gray-950 text-gray-200">
+                          {laneRules.map((rule) => (
+                            <option key={rule.id} value={`band:${rule.id}`}>
+                              {rule.name}
+                              {rule.enabled ? '' : ' (Off)'}
+                            </option>
+                          ))}
+                        </optgroup>
+                      </select>
 
-                      <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setMatrixOpen((v) => !v)}
+                        className={cn(
+                          'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap',
+                          matrixOpen
+                            ? 'bg-white/10 text-white'
+                            : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                        )}
+                        title="Toggle Difficulty × Density Matrix table"
+                      >
+                        Matrix
+                      </button>
+
+                      <button
+                        onClick={addSection}
+                        className="flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 transition-colors whitespace-nowrap shrink-0"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Section</span>
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSectionsPanelOpen((v) => !v)}
+                    aria-expanded={sectionsPanelOpen}
+                    className="p-0.5 rounded-sm text-gray-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+                    title={sectionsPanelOpen ? 'Collapse Sections & Difficulty' : 'Expand Sections & Difficulty'}
+                  >
+                    {sectionsPanelOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              {sectionsPanelOpen && (
+                <div className="pt-1 space-y-2">
+                  {/* Collapsible Difficulty x Density Matrix (collapsed by default) */}
+                  {matrixOpen && (
+                    <div className="pb-1">
+                      <div className="flex items-center justify-between pb-1 text-xs text-gray-400">
+                        <span>Difficulty × Density Matrix (Grid Cap + Chord Priority Cap)</span>
                         <button
-                          onClick={() => removeSection(section.id)}
-                          className="p-1 text-gray-500 hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"
-                          title="Remove section"
+                          type="button"
+                          onClick={() => setDifficultyMatrix(DEFAULT_DIFFICULTY_MATRIX)}
+                          className="text-gray-500 hover:text-gray-200 transition-colors whitespace-nowrap shrink-0"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          Reset Matrix
                         </button>
                       </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs border-collapse">
+                          <thead>
+                            <tr className="text-gray-400">
+                              <th className="text-left font-medium px-1.5 py-0.5 w-20">Density</th>
+                              <th className="text-center font-medium px-1.5 py-0.5 text-sky-300">Easy</th>
+                              <th className="text-center font-medium px-1.5 py-0.5 text-amber-300">Normal</th>
+                              <th className="text-center font-medium px-1.5 py-0.5 text-emerald-400">Hard</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(['Sparse', 'Medium', 'Dense'] as SectionDensity[]).map((densityRow) => (
+                              <tr key={densityRow} className="hover:bg-white/[0.02]">
+                                <td className="px-1.5 py-0.5 font-medium text-gray-300">{densityRow}</td>
+                                {(['easy', 'normal', 'hard'] as ChartDifficulty[]).map((diffCol) => {
+                                  const cell = difficultyMatrix[densityRow][diffCol];
+                                  return (
+                                    <td key={diffCol} className="px-1 py-0.5 text-center">
+                                      <div className="inline-flex items-center gap-0.5">
+                                        <select
+                                          value={String(cell.subdivision)}
+                                          onChange={(e) => {
+                                            const rawVal = e.target.value;
+                                            const parsed: DensitySubdivisionCap =
+                                              rawVal === 'all'
+                                                ? 'all'
+                                                : (Number(rawVal) as DensitySubdivisionCap);
+                                            setDifficultyMatrix((prev) => ({
+                                              ...prev,
+                                              [densityRow]: {
+                                                ...prev[densityRow],
+                                                [diffCol]: {
+                                                  ...prev[densityRow][diffCol],
+                                                  subdivision: parsed,
+                                                },
+                                              },
+                                            }));
+                                          }}
+                                          className="bg-transparent hover:bg-white/[0.06] rounded-sm px-1 py-0.5 text-xs font-mono tabular-nums text-gray-200 focus:outline-none cursor-pointer"
+                                          title="Maximum note subdivision grid allowed"
+                                        >
+                                          <option value="0" className="bg-gray-950 text-gray-200">Off (0)</option>
+                                          <option value="1" className="bg-gray-950 text-gray-200">1/1</option>
+                                          <option value="2" className="bg-gray-950 text-gray-200">1/2</option>
+                                          <option value="4" className="bg-gray-950 text-gray-200">1/4</option>
+                                          <option value="8" className="bg-gray-950 text-gray-200">1/8</option>
+                                          <option value="16" className="bg-gray-950 text-gray-200">1/16</option>
+                                          <option value="all" className="bg-gray-950 text-gray-200">All</option>
+                                        </select>
+                                        <select
+                                          value={cell.maxChords === null ? 'all' : String(cell.maxChords)}
+                                          onChange={(e) => {
+                                            const rawVal = e.target.value;
+                                            const parsed: MaxChordsCap =
+                                              rawVal === 'all'
+                                                ? null
+                                                : (Number(rawVal) as Exclude<MaxChordsCap, null>);
+                                            setDifficultyMatrix((prev) => ({
+                                              ...prev,
+                                              [densityRow]: {
+                                                ...prev[densityRow],
+                                                [diffCol]: {
+                                                  ...prev[densityRow][diffCol],
+                                                  maxChords: parsed,
+                                                },
+                                              },
+                                            }));
+                                          }}
+                                          className="bg-transparent hover:bg-white/[0.06] rounded-sm px-1 py-0.5 text-xs font-mono tabular-nums text-gray-200 focus:outline-none cursor-pointer"
+                                          title="Max simultaneous notes (Chords) kept by Lane priority"
+                                        >
+                                          <option value="1" className="bg-gray-950 text-gray-200">1·Single</option>
+                                          <option value="2" className="bg-gray-950 text-gray-200">2·Jump</option>
+                                          <option value="3" className="bg-gray-950 text-gray-200">3·Hand</option>
+                                          <option value="all" className="bg-gray-950 text-gray-200">All</option>
+                                        </select>
+                                      </div>
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
-                  );
-                })}
+                  )}
 
-                {sections.length > 0 && (
-                  <div className="grid grid-cols-1 md:grid-cols-[2.25rem_5.5rem_1fr_7.5rem_4.25rem_4.25rem_4.25rem_2rem] gap-2.5 items-center px-3 pt-2 border-t border-gray-800 text-xs font-mono tabular-nums">
-                    <div className="md:col-span-4 text-gray-400 font-sans font-medium">
-                      {sectionMetricMode === 'avg' ? 'Overall Avg / Beat' : 'Total Inputs'}
-                    </div>
-                    <div className="flex items-center justify-between md:justify-end text-sky-300 font-semibold">
-                      <span className="md:hidden font-sans text-sky-400">Easy</span>
-                      <span>
-                        {sectionMetricMode === 'avg'
-                          ? sectionDifficultyCounts.totals.easy.avg.toFixed(2)
-                          : sectionDifficultyCounts.totals.easy.count}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between md:justify-end text-amber-300 font-semibold">
-                      <span className="md:hidden font-sans text-amber-400">Normal</span>
-                      <span>
-                        {sectionMetricMode === 'avg'
-                          ? sectionDifficultyCounts.totals.normal.avg.toFixed(2)
-                          : sectionDifficultyCounts.totals.normal.count}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between md:justify-end text-emerald-400 font-semibold">
-                      <span className="md:hidden font-sans text-emerald-400">Hard</span>
-                      <span>
-                        {sectionMetricMode === 'avg'
-                          ? sectionDifficultyCounts.totals.hard.avg.toFixed(2)
-                          : sectionDifficultyCounts.totals.hard.count}
-                      </span>
-                    </div>
-                    <div />
-                  </div>
-                )}
+                  {/* Flat Spreadsheet Section Rows (zero lines, black writing inputs) */}
+                  <div className="space-y-1">
+                    {sections.length > 0 && (
+                      <div className="hidden md:grid md:grid-cols-[2.25rem_5.5rem_1fr_6.5rem_4rem_4rem_4rem_2rem] gap-1.5 items-center py-0.5 text-xs font-medium uppercase tracking-wider text-gray-500">
+                        <span className="text-right">#</span>
+                        <span className="px-1">Beat</span>
+                        <span className="px-1">Type</span>
+                        <span className="px-1">Density</span>
+                        <span className="text-right text-sky-400">
+                          E{sectionMetricMode === 'avg' ? '/b' : ''}
+                        </span>
+                        <span className="text-right text-amber-400">
+                          N{sectionMetricMode === 'avg' ? '/b' : ''}
+                        </span>
+                        <span className="text-right text-emerald-400">
+                          H{sectionMetricMode === 'avg' ? '/b' : ''}
+                        </span>
+                        <span />
+                      </div>
+                    )}
 
-                {sections.length === 0 && (
-                  <div className="text-center py-4 text-gray-500 text-sm border border-dashed border-gray-800 rounded-lg">
-                    No sections defined. Generated stepfile will use default density.
-                  </div>
-                )}
-              </div>
-            </div>
+                    {sections.map((section, idx) => {
+                      const stats = sectionDifficultyCounts.bySectionId[section.id] || {
+                        easy: { count: 0, avg: 0 },
+                        normal: { count: 0, avg: 0 },
+                        hard: { count: 0, avg: 0 },
+                        beats: 0,
+                      };
+                      const formatMetric = (m: { count: number; avg: number }) =>
+                        sectionMetricMode === 'avg' ? m.avg.toFixed(2) : String(m.count);
+                      return (
+                        <div
+                          key={section.id}
+                          className="grid grid-cols-1 md:grid-cols-[2.25rem_5.5rem_1fr_6.5rem_4rem_4rem_4rem_2rem] gap-1.5 items-center py-0.5 hover:bg-white/[0.02] rounded-sm"
+                        >
+                          <div className="hidden md:block text-xs font-mono tabular-nums text-gray-500 text-right">
+                            {idx + 1}
+                          </div>
 
-            {/* Exports */}
-            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                <h2 className="text-sm font-medium text-gray-400 tracking-wider uppercase">Generated Outputs</h2>
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex space-x-1 bg-gray-950 rounded-lg p-1 border border-gray-800">
-                    <button
-                      onClick={() => setOutputTab('sm')}
-                      className={cn(
-                        'px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0',
-                        outputTab === 'sm' ? 'bg-gray-800 text-white' : 'text-gray-500 hover:text-gray-300'
-                      )}
-                    >
-                      .sm Header
-                    </button>
-                    <button
-                      onClick={() => setOutputTab('llm')}
-                      className={cn(
-                        'px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0',
-                        outputTab === 'llm' ? 'bg-gray-800 text-white' : 'text-gray-500 hover:text-gray-300'
-                      )}
-                    >
-                      LLM Prompt
-                    </button>
-                    <button
-                      onClick={() => setOutputTab('project')}
-                      className={cn(
-                        'px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0',
-                        outputTab === 'project' ? 'bg-gray-800 text-white' : 'text-gray-500 hover:text-gray-300'
-                      )}
-                    >
-                      Project JSON
-                    </button>
+                          <div className="flex items-center gap-1.5">
+                            <span className="md:hidden text-xs text-gray-500 w-14">Beat</span>
+                            <input
+                              type="number"
+                              step="1"
+                              value={section.beat}
+                              onChange={(e) =>
+                                updateSection(section.id, { beat: parseFloat(e.target.value) || 0 })
+                              }
+                              title={`${stats.beats.toFixed(0)} beats in this section`}
+                              className="bg-black ring-1 ring-white/25 hover:ring-white/45 focus:ring-2 focus:ring-emerald-400 rounded-sm px-1.5 py-0.5 w-full text-xs font-mono tabular-nums text-white focus:outline-none"
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            <span className="md:hidden text-xs text-gray-500 w-14">Type</span>
+                            <input
+                              type="text"
+                              value={section.label}
+                              onChange={(e) => updateSection(section.id, { label: e.target.value })}
+                              className="bg-black ring-1 ring-white/25 hover:ring-white/45 focus:ring-2 focus:ring-emerald-400 rounded-sm px-1.5 py-0.5 w-full text-xs text-white focus:outline-none"
+                            />
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            <span className="md:hidden text-xs text-gray-500 w-14">Density</span>
+                            <select
+                              value={section.density}
+                              onChange={(e) =>
+                                updateSection(section.id, { density: e.target.value as SectionDensity })
+                              }
+                              className="bg-transparent hover:bg-white/[0.05] focus:bg-white/[0.08] rounded-sm px-1 py-0.5 w-full text-xs focus:outline-none cursor-pointer"
+                            >
+                              <option value="Sparse" className="bg-gray-950 text-gray-200">Sparse</option>
+                              <option value="Medium" className="bg-gray-950 text-gray-200">Medium</option>
+                              <option value="Dense" className="bg-gray-950 text-gray-200">Dense</option>
+                            </select>
+                          </div>
+
+                          <div
+                            className="flex items-center justify-between md:justify-end gap-1 font-mono tabular-nums text-xs"
+                            title={`${stats.easy.count} inputs across ${stats.beats.toFixed(0)} beats`}
+                          >
+                            <span className="md:hidden text-sky-400">Easy</span>
+                            <span className="text-sky-300 font-medium">{formatMetric(stats.easy)}</span>
+                          </div>
+
+                          <div
+                            className="flex items-center justify-between md:justify-end gap-1 font-mono tabular-nums text-xs"
+                            title={`${stats.normal.count} inputs across ${stats.beats.toFixed(0)} beats`}
+                          >
+                            <span className="md:hidden text-amber-400">Normal</span>
+                            <span className="text-amber-300 font-medium">{formatMetric(stats.normal)}</span>
+                          </div>
+
+                          <div
+                            className="flex items-center justify-between md:justify-end gap-1 font-mono tabular-nums text-xs"
+                            title={`${stats.hard.count} inputs across ${stats.beats.toFixed(0)} beats`}
+                          >
+                            <span className="md:hidden text-emerald-400">Hard</span>
+                            <span className="text-emerald-400 font-medium">{formatMetric(stats.hard)}</span>
+                          </div>
+
+                          <div className="flex justify-end">
+                            <button
+                              onClick={() => removeSection(section.id)}
+                              className="p-0.5 text-gray-500 hover:text-red-400 rounded-sm transition-colors"
+                              title="Remove section"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {sections.length > 0 && (
+                      <div className="grid grid-cols-1 md:grid-cols-[2.25rem_5.5rem_1fr_6.5rem_4rem_4rem_4rem_2rem] gap-1.5 items-center pt-1 text-xs font-mono tabular-nums">
+                        <div className="md:col-span-4 text-gray-400 font-sans font-medium">
+                          {sectionMetricMode === 'avg' ? 'Overall Avg / Beat' : 'Total Inputs'}
+                        </div>
+                        <div className="flex items-center justify-between md:justify-end text-sky-300 font-semibold">
+                          <span className="md:hidden font-sans text-sky-400">Easy</span>
+                          <span>
+                            {sectionMetricMode === 'avg'
+                              ? sectionDifficultyCounts.totals.easy.avg.toFixed(2)
+                              : sectionDifficultyCounts.totals.easy.count}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between md:justify-end text-amber-300 font-semibold">
+                          <span className="md:hidden font-sans text-amber-400">Normal</span>
+                          <span>
+                            {sectionMetricMode === 'avg'
+                              ? sectionDifficultyCounts.totals.normal.avg.toFixed(2)
+                              : sectionDifficultyCounts.totals.normal.count}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between md:justify-end text-emerald-400 font-semibold">
+                          <span className="md:hidden font-sans text-emerald-400">Hard</span>
+                          <span>
+                            {sectionMetricMode === 'avg'
+                              ? sectionDifficultyCounts.totals.hard.avg.toFixed(2)
+                              : sectionDifficultyCounts.totals.hard.count}
+                          </span>
+                        </div>
+                        <div />
+                      </div>
+                    )}
+
+                    {sections.length === 0 && (
+                      <div className="text-center py-2 text-gray-500 text-xs">
+                        No sections defined. Generated stepfile will use default density.
+                      </div>
+                    )}
                   </div>
+                </div>
+              )}
+            </section>
+
+            {/* Collapsible Exports & Outputs (collapsed by default) */}
+            <section>
+              <div className="flex flex-wrap items-center justify-between gap-2 py-0.5">
+                <button
+                  type="button"
+                  onClick={() => setOutputsPanelOpen((v) => !v)}
+                  aria-expanded={outputsPanelOpen}
+                  className="flex items-center gap-2 min-w-0 flex-1 text-left text-xs hover:text-white transition-colors"
+                >
+                  <span className="font-semibold uppercase tracking-wider text-gray-200 whitespace-nowrap">
+                    Generated Outputs
+                  </span>
+                  <span className="text-gray-400 truncate">
+                    .sm Header · LLM Prompt · Project JSON
+                  </span>
+                </button>
+
+                <div className="inline-flex items-center gap-0.5 shrink-0">
+                  {outputsPanelOpen && (
+                    <>
+                      <button
+                        onClick={() => setOutputTab('sm')}
+                        className={cn(
+                          'px-1.5 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
+                          outputTab === 'sm' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300 hover:bg-white/[0.06]'
+                        )}
+                      >
+                        .sm Header
+                      </button>
+                      <button
+                        onClick={() => setOutputTab('llm')}
+                        className={cn(
+                          'px-1.5 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
+                          outputTab === 'llm' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300 hover:bg-white/[0.06]'
+                        )}
+                      >
+                        LLM Prompt
+                      </button>
+                      <button
+                        onClick={() => setOutputTab('project')}
+                        className={cn(
+                          'px-1.5 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
+                          outputTab === 'project' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300 hover:bg-white/[0.06]'
+                        )}
+                      >
+                        Project JSON
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigator.clipboard.writeText(
+                        outputTab === 'sm'
+                          ? generateSMHeader()
+                          : outputTab === 'llm'
+                          ? generateLLMPrompt()
+                          : generateProjectJson()
+                      )
+                    }
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm hover:bg-white/[0.06] text-gray-300 transition-colors whitespace-nowrap shrink-0"
+                    title="Copy active output to clipboard"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Copy</span>
+                  </button>
                   <button
                     type="button"
                     onClick={handleDownloadProjectJson}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 transition-colors whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 transition-colors whitespace-nowrap shrink-0"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Download .json</span>
+                    <Download className="w-3 h-3" />
+                    <span>.json</span>
                   </button>
-                  <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer transition-colors whitespace-nowrap shrink-0">
-                    <FolderOpen className="w-3.5 h-3.5" />
-                    <span>Import .json</span>
+                  <label className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm hover:bg-white/[0.06] text-gray-200 cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                    <FolderOpen className="w-3 h-3" />
+                    <span>Import</span>
                     <input
                       type="file"
                       accept=".json,application/json"
@@ -1858,34 +2578,28 @@ Follow the syntax format strictly:
                       className="hidden"
                     />
                   </label>
+                  <button
+                    type="button"
+                    onClick={() => setOutputsPanelOpen((v) => !v)}
+                    aria-expanded={outputsPanelOpen}
+                    className="p-0.5 rounded-sm text-gray-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+                    title={outputsPanelOpen ? 'Collapse Generated Outputs' : 'Expand Generated Outputs'}
+                  >
+                    {outputsPanelOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
                 </div>
               </div>
 
-              <div className="relative">
-                <pre className="bg-gray-950 border border-gray-800 p-4 rounded-lg text-sm font-mono text-gray-300 overflow-x-auto min-h-[160px] max-h-[360px] whitespace-pre-wrap">
+              {outputsPanelOpen && (
+                <pre className="bg-black/50 p-2 text-xs font-mono text-gray-300 overflow-x-auto min-h-[140px] max-h-[320px] whitespace-pre-wrap">
                   {outputTab === 'sm'
                     ? generateSMHeader()
                     : outputTab === 'llm'
                     ? generateLLMPrompt()
                     : generateProjectJson()}
                 </pre>
-                <button
-                  onClick={() =>
-                    navigator.clipboard.writeText(
-                      outputTab === 'sm'
-                        ? generateSMHeader()
-                        : outputTab === 'llm'
-                        ? generateLLMPrompt()
-                        : generateProjectJson()
-                    )
-                  }
-                  className="absolute top-4 right-4 p-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded-md transition-colors shadow-sm"
-                  title="Copy to clipboard"
-                >
-                  <Copy className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
+              )}
+            </section>
           </div>
         ) : (
           <div>

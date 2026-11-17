@@ -4,6 +4,14 @@
 
 **StepSync** is a browser-based rhythm chart synchronization studio, drum-stem analyzer, difficulty planner, and 4-key (`D F J K`) StepMania simulator. It combines interactive BPM/offset alignment, client-side drum stem separation (DSP HPSS or WebGPU HT-Demucs), customizable frequency-band-to-arrow mapping, and live playtesting in one workspace.
 
+## Video Walkthrough
+
+Click the preview below to watch StepSync in action (drum stem detection, difficulty planning, and live simulator playback):
+
+[![Watch StepSync Walkthrough on YouTube](https://img.youtube.com/vi/IhdTr6K_CL4/hqdefault.jpg)](https://www.youtube.com/watch?v=IhdTr6K_CL4)
+
+> Direct link: [https://www.youtube.com/watch?v=IhdTr6K_CL4](https://www.youtube.com/watch?v=IhdTr6K_CL4)
+
 ---
 
 ## Key Features

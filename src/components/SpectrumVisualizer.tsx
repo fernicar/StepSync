@@ -71,7 +71,7 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [mode, setMode] = useState<SpectrumMode>('bars');
   const [source, setSource] = useState<SpectrumSource>('output');
   const [showBands, setShowBands] = useState(true);
@@ -186,7 +186,12 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
       }
 
       // Logarithmic vertical frequency grid lines
-      ctx.font = '10px monospace';
+      const rootPx = parseFloat(document.documentElement.style.fontSize) || 20;
+      const scaleF = rootPx / 16;
+      const gridPx = Math.round(10 * scaleF);
+      const bandPx = Math.round(9 * scaleF);
+
+      ctx.font = `${gridPx}px monospace`;
       ctx.textAlign = 'center';
       for (const g of GRID_FREQS) {
         const gx = freqToX(g.hz, width);
@@ -196,13 +201,13 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
         ctx.lineTo(gx, topPad + plotH);
         ctx.stroke();
 
-        ctx.fillStyle = 'rgba(156,163,175,0.65)';
+        ctx.fillStyle = 'rgba(156,163,175,0.78)';
         ctx.fillText(g.label, gx, height - (showBands ? 14 : 3));
       }
 
       // Optional drum-band brackets along the bottom edge
       if (showBands) {
-        ctx.font = '9px monospace';
+        ctx.font = `${bandPx}px monospace`;
         for (let idx = 0; idx < BAND_ZONES.length; idx++) {
           const z = BAND_ZONES[idx];
           const x0 = freqToX(z.minHz, width);
@@ -402,7 +407,7 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
         ctx.stroke();
 
         // Compact min/max Hz badges at top corners of the passband
-        ctx.font = 'bold 10px monospace';
+        ctx.font = `bold ${Math.round(10 * scaleF)}px monospace`;
         ctx.fillStyle = '#34d399';
         const minLabel = formatHz(soloBand.minHz);
         const maxLabel = formatHz(soloBand.maxHz);
@@ -547,112 +552,111 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
   return (
     <section
       ref={containerRef}
-      className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden"
       aria-label="Frequency Spectrum Analyzer"
     >
-      <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-gray-800/80 flex-nowrap">
-        <div className="flex items-center gap-2.5 min-w-0 flex-1 overflow-hidden">
-          <div className="flex items-center gap-1.5 shrink-0">
-            <BarChart2 className="w-4 h-4 text-emerald-400" />
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-200 whitespace-nowrap">
-              Spectrum
-            </h2>
-          </div>
+      <div className="flex items-center justify-between gap-1 py-0.5 flex-nowrap">
+        <button
+          type="button"
+          onClick={() => setCollapsed((v) => !v)}
+          className="flex items-center gap-1.5 min-w-0 flex-1 text-left hover:text-white transition-colors"
+          aria-expanded={!collapsed}
+          title={collapsed ? 'Expand spectrum analyzer' : 'Collapse spectrum analyzer'}
+        >
+          <BarChart2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span className="text-xs font-semibold uppercase tracking-wider text-gray-200 whitespace-nowrap">
+            Spectrum
+          </span>
+          <span className="hidden sm:inline text-xs text-gray-400 font-mono tabular-nums truncate min-w-0">
+            {soloBand
+              ? `Solo ${formatHz(soloBand.minHz)}–${formatHz(soloBand.maxHz)}`
+              : hoverFreq !== null
+              ? `${formatHz(hoverFreq)} (${freqToNoteLabel(hoverFreq)})${hoverBand ? ` · ${hoverBand}` : ''}`
+              : peakFreq !== null
+              ? `Peak ${formatHz(peakFreq)} (${freqToNoteLabel(peakFreq)})`
+              : collapsed
+              ? 'Collapsed · click to inspect Hz & solo bands'
+              : 'Drag to solo band'}
+          </span>
+        </button>
 
-          <div className="hidden sm:block text-xs text-gray-400 font-mono tabular-nums truncate min-w-0">
-            {hoverFreq !== null ? (
-              <span className="text-white">
-                {formatHz(hoverFreq)} ({freqToNoteLabel(hoverFreq)})
-                {hoverBand ? ` · ${hoverBand}` : ''}
-              </span>
-            ) : peakFreq !== null ? (
-              <span className="text-gray-300">
-                Peak {formatHz(peakFreq)} ({freqToNoteLabel(peakFreq)})
-              </span>
-            ) : (
-              <span>Drag to solo band</span>
-            )}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
           {soloBand && (
             <button
               type="button"
               onClick={() => applySoloBand(null)}
-              className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded-sm bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 transition-colors whitespace-nowrap"
               title="Clear frequency solo (Esc or click spectrum)"
             >
               <X className="w-3 h-3" />
-              <span>Clear</span>
+              <span>Clear Solo</span>
             </button>
           )}
-          {hasDrumStem && (
-            <div className="inline-flex p-0.5 bg-gray-950 border border-gray-800 rounded-md">
+
+          {!collapsed && (
+            <div className="inline-flex items-center gap-0.5">
+              {hasDrumStem &&
+                (
+                  [
+                    { id: 'output', label: 'Output' },
+                    { id: 'drums', label: 'Drums' },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setSource(opt.id)}
+                    className={cn(
+                      'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap',
+                      activeSource === opt.id
+                        ? 'bg-emerald-500 text-gray-950 font-semibold'
+                        : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+
               {(
                 [
-                  { id: 'output', label: 'Output' },
-                  { id: 'drums', label: 'Drums' },
+                  { id: 'bars', label: 'Bars' },
+                  { id: 'landscape', label: '3D' },
                 ] as const
               ).map((opt) => (
                 <button
                   key={opt.id}
                   type="button"
-                  onClick={() => setSource(opt.id)}
+                  onClick={() => setMode(opt.id)}
                   className={cn(
-                    'px-2 py-0.5 text-xs rounded transition-colors whitespace-nowrap',
-                    activeSource === opt.id
-                      ? 'bg-emerald-500 text-gray-950 font-semibold'
-                      : 'text-gray-400 hover:text-white'
+                    'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap',
+                    mode === opt.id
+                      ? 'bg-white/10 text-white font-medium'
+                      : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
                   )}
                 >
                   {opt.label}
                 </button>
               ))}
+
+              <button
+                type="button"
+                onClick={() => setShowBands((v) => !v)}
+                className={cn(
+                  'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap',
+                  showBands
+                    ? 'bg-white/10 text-gray-200'
+                    : 'text-gray-500 hover:text-gray-300 hover:bg-white/[0.06]'
+                )}
+                title="Toggle Kick / Tom / Clap / Hat frequency brackets"
+              >
+                Bands
+              </button>
             </div>
           )}
-
-          <div className="inline-flex p-0.5 bg-gray-950 border border-gray-800 rounded-md">
-            {(
-              [
-                { id: 'bars', label: 'Bars+Dots' },
-                { id: 'landscape', label: '3D' },
-              ] as const
-            ).map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setMode(opt.id)}
-                className={cn(
-                  'px-2 py-0.5 text-xs rounded transition-colors whitespace-nowrap',
-                  mode === opt.id
-                    ? 'bg-gray-800 text-white font-medium'
-                    : 'text-gray-400 hover:text-white'
-                )}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setShowBands((v) => !v)}
-            className={cn(
-              'px-2 py-1 text-xs rounded border transition-colors whitespace-nowrap',
-              showBands
-                ? 'bg-gray-800 border-gray-700 text-gray-200'
-                : 'bg-gray-950 border-gray-800 text-gray-500 hover:text-gray-300'
-            )}
-            title="Toggle Kick / Tom / Clap / Hat frequency brackets"
-          >
-            Bands
-          </button>
 
           <button
             type="button"
             onClick={() => setCollapsed((v) => !v)}
-            className="p-1 text-gray-400 hover:text-white rounded hover:bg-gray-800 transition-colors"
+            className="p-0.5 text-gray-400 hover:text-white rounded-sm hover:bg-white/[0.06] transition-colors"
             title={collapsed ? 'Expand spectrum analyzer' : 'Collapse spectrum analyzer'}
             aria-expanded={!collapsed}
           >

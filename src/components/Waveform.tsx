@@ -117,6 +117,9 @@ export function Waveform({
         ctx.stroke();
       }
 
+      const rootPx = parseFloat(document.documentElement.style.fontSize) || 20;
+      const scaleF = rootPx / 16;
+
       // Draw beat lines
       if (sync.bpm > 0) {
         const secondsPerBeat = 60.0 / sync.bpm;
@@ -135,7 +138,7 @@ export function Waveform({
             ctx.stroke();
 
             ctx.fillStyle = i % 4 === 0 ? '#ef4444' : '#9ca3af';
-            ctx.font = '12px monospace';
+            ctx.font = `${Math.round(11 * scaleF)}px monospace`;
             const beatNumText = i.toString();
             const textWidth = ctx.measureText(beatNumText).width;
             ctx.fillText(beatNumText, x - textWidth / 2, height - 5);
@@ -151,7 +154,7 @@ export function Waveform({
         const sorted = [...sections].sort((a, b) => a.beat - b.beat);
 
         ctx.save();
-        ctx.font = 'bold 11px monospace';
+        ctx.font = `bold ${Math.round(10 * scaleF)}px monospace`;
         ctx.lineJoin = 'round';
 
         for (let idx = 0; idx < sorted.length; idx++) {
@@ -208,7 +211,7 @@ export function Waveform({
           pink: '#ec4899',
           violet: '#a78bfa',
         };
-        ctx.font = 'bold 10px monospace';
+        ctx.font = `bold ${Math.round(9.5 * scaleF)}px monospace`;
         const drawMarker = (ev: DrumEvent, yTop: number, barH: number, textY: number) => {
           const x = ((ev.time - startTime) / windowSize) * width;
           const fallbackColor =
@@ -264,7 +267,7 @@ export function Waveform({
   return (
     <canvas
       ref={canvasRef}
-      className="w-full h-24 bg-black rounded-md shadow-inner border border-gray-800"
+      className="w-full h-24 bg-black block"
       width={800}
       height={96}
     />

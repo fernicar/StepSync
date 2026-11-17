@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RotateCcw } from 'lucide-react';
+import { ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
 import {
   SyncData,
   Section,
@@ -15,6 +15,7 @@ import { engine, SimDrumBand, SimTriggerEvent } from '../lib/AudioEngine';
 import { generateDifficultyChart, getEffectiveAltLane } from '../lib/drumAnalysis';
 import { AuditionMode } from './StemStudio';
 import { cn } from '../lib/utils';
+import { triggerBlobDownload } from '../lib/projectCache';
 
 interface ScoreSummary {
   counts: Record<JudgementTier, number>;
@@ -632,12 +633,7 @@ export function Simulator({
     const data = JSON.stringify(combined, null, 2);
 
     const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'recorded-events.json';
-    a.click();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, 'recorded-events.json');
   };
 
   useEffect(() => {
@@ -871,6 +867,9 @@ export function Simulator({
         }
       }
 
+      const rootPx = parseFloat(document.documentElement.style.fontSize) || 20;
+      const scaleF = rootPx / 16;
+
       for (let i = 0; i < 4; i++) {
         const cx = i * laneWidth + laneWidth / 2;
         const isPressed =
@@ -878,7 +877,7 @@ export function Simulator({
         const activeColor = laneHitFlashColor[i] || (isPressed ? '#ffffff' : null);
 
         ctx.fillStyle = activeColor || 'rgba(255,255,255,0.45)';
-        ctx.font = 'bold 11px monospace';
+        ctx.font = `bold ${Math.round(11 * scaleF)}px monospace`;
         ctx.textAlign = 'center';
         ctx.fillText(keyHints[i], cx, targetY - 28);
 
@@ -890,7 +889,7 @@ export function Simulator({
         ctx.lineWidth = activeColor ? 2.5 : 2;
         ctx.strokeRect(cx - 20, targetY - 20, 40, 40);
         ctx.fillStyle = activeColor || 'rgba(255,255,255,0.25)';
-        ctx.font = '12px monospace';
+        ctx.font = `${Math.round(12 * scaleF)}px monospace`;
         ctx.fillText(laneLabels[i], cx, targetY + 4);
       }
       ctx.textAlign = 'left';
@@ -928,13 +927,13 @@ export function Simulator({
           ctx.stroke();
 
           ctx.fillStyle = i % 4 === 0 ? '#ef4444' : '#9ca3af';
-          ctx.font = '14px monospace';
+          ctx.font = `${Math.round(12 * scaleF)}px monospace`;
           ctx.fillText(i.toString(), 5, beatY - 5);
 
           if (secCue) {
             const cueText = `${secCue.label} · ${secCue.density}`;
             ctx.save();
-            ctx.font = 'bold 11px monospace';
+            ctx.font = `bold ${Math.round(10 * scaleF)}px monospace`;
             ctx.textAlign = 'right';
             ctx.lineJoin = 'round';
             ctx.lineWidth = 3;
@@ -1001,7 +1000,7 @@ export function Simulator({
           ctx.globalAlpha = alpha;
           ctx.textAlign = 'center';
           ctx.lineJoin = 'round';
-          ctx.font = 'bold 20px monospace';
+          ctx.font = `bold ${Math.round(18 * scaleF)}px monospace`;
           ctx.lineWidth = 4;
           ctx.strokeStyle = 'rgba(0, 0, 0, 0.92)';
           ctx.strokeText(meta.label, width / 2, 152);
@@ -1013,21 +1012,21 @@ export function Simulator({
               lastHud.offsetMs === 0
                 ? '0ms'
                 : `${lastHud.offsetMs > 0 ? '+' : ''}${lastHud.offsetMs}ms`;
-            ctx.font = 'bold 11px monospace';
+            ctx.font = `bold ${Math.round(11 * scaleF)}px monospace`;
             ctx.lineWidth = 3;
-            ctx.strokeText(errStr, width / 2, 170);
+            ctx.strokeText(errStr, width / 2, 174);
             ctx.fillStyle =
               lastHud.offsetMs < 0 ? '#7dd3fc' : lastHud.offsetMs > 0 ? '#fcd34d' : '#ffffff';
-            ctx.fillText(errStr, width / 2, 170);
+            ctx.fillText(errStr, width / 2, 174);
           }
 
           if (lastHud.combo >= 2) {
             const comboText = `${lastHud.combo} COMBO`;
-            ctx.font = 'bold 16px monospace';
+            ctx.font = `bold ${Math.round(15 * scaleF)}px monospace`;
             ctx.lineWidth = 4;
-            ctx.strokeText(comboText, width / 2, 194);
+            ctx.strokeText(comboText, width / 2, 200);
             ctx.fillStyle = '#ffffff';
-            ctx.fillText(comboText, width / 2, 194);
+            ctx.fillText(comboText, width / 2, 200);
           }
           ctx.restore();
         }
@@ -1053,61 +1052,51 @@ export function Simulator({
     tomBandSet,
   ]);
 
+  const [importSettingsOpen, setImportSettingsOpen] = useState(false);
+
   const canExport = recordedEvents.length > 0 || (showDrumBaseLayer && drumEvents.length > 0);
 
   return (
-    <div className="flex flex-col md:flex-row gap-5 items-start justify-center p-1 rounded-lg w-full">
+    <div className="flex flex-col md:flex-row gap-4 items-start justify-center w-full">
       {/* LEFT COLUMN: Simulator Canvas */}
       <div className="flex flex-col items-center flex-shrink-0">
         <canvas
           ref={canvasRef}
-          className="bg-black border-2 border-gray-800 rounded-lg shadow-2xl"
+          className="bg-black block"
           width={360}
           height={500}
         />
-        <div className="mt-2.5 text-center text-gray-400 text-xs space-y-1">
-          <p>
-            Press <kbd className="bg-gray-800 px-2 py-0.5 rounded text-gray-300 font-mono border border-gray-700">Space</kbd> to toggle playback.
-          </p>
-          <p>
-            While recording: Arrow keys or <kbd className="bg-gray-800 px-1.5 py-0.5 rounded font-mono border border-gray-700">D F J K</kbd> map directly to lanes.
-          </p>
+        <div className="mt-1.5 text-center text-gray-500 text-xs font-mono">
+          Space: Play/Pause · D F J K / Arrows: Lanes
         </div>
       </div>
 
-      {/* RIGHT COLUMN: Settings and Controls */}
-      <div className="flex flex-col w-full max-w-sm space-y-3">
-        {/* Sync Info */}
-        <div className="flex space-x-6 items-center justify-center p-3 bg-gray-900 rounded-lg border border-gray-800">
-          <div className="flex flex-col text-center">
-            <span className="text-2xl font-mono tabular-nums font-bold text-white">{sync.bpm.toFixed(2)}</span>
-            <span className="text-xs text-gray-500 uppercase tracking-wider">BPM</span>
+      {/* RIGHT COLUMN: Flat Borderless Controls */}
+      <div className="flex flex-col w-full max-w-md space-y-3">
+        {/* Sync Summary */}
+        <div className="flex items-center gap-4 font-mono tabular-nums">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-base font-bold text-white">{sync.bpm.toFixed(2)}</span>
+            <span className="text-xs text-gray-500 uppercase">BPM</span>
           </div>
-          <div className="h-8 w-px bg-gray-700"></div>
-          <div className="flex flex-col text-center">
-            <span className="text-2xl font-mono tabular-nums font-bold text-emerald-400">{sync.offset.toFixed(3)}s</span>
-            <span className="text-xs text-gray-500 uppercase tracking-wider">Offset</span>
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-base font-bold text-emerald-400">{sync.offset.toFixed(3)}s</span>
+            <span className="text-xs text-gray-500 uppercase">Offset</span>
           </div>
         </div>
 
-        {/* Drum Stem Layer & Difficulty Switcher */}
-        <div className="space-y-2.5 p-3 bg-gray-900 rounded-lg border border-gray-800">
+        {/* Difficulty & Overdub */}
+        <div className="space-y-1">
           <div className="flex items-center justify-between gap-2">
-            <h4 className="text-sm font-medium text-gray-300">Drum Base Layer</h4>
-            <span className="text-xs font-mono tabular-nums text-gray-400">
-              {drumEvents.length}
-              {rawDrumEvents.length !== drumEvents.length ? ` / ${rawDrumEvents.length}` : ''} notes
+            <span className="text-xs font-medium text-gray-300">
+              Chart ({drumEvents.length}{rawDrumEvents.length !== drumEvents.length ? `/${rawDrumEvents.length}` : ''})
             </span>
-          </div>
-
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-gray-400">Difficulty</span>
-            <div className="inline-flex p-0.5 bg-gray-950 border border-gray-800 rounded-md">
+            <div className="inline-flex items-center gap-0.5">
               {(
                 [
-                  { id: 'easy', label: 'Easy', activeClass: 'bg-sky-500/25 text-sky-300' },
-                  { id: 'normal', label: 'Normal', activeClass: 'bg-amber-500/25 text-amber-300' },
-                  { id: 'hard', label: 'Hard', activeClass: 'bg-emerald-500/25 text-emerald-300' },
+                  { id: 'easy', label: 'Easy', activeClass: 'bg-sky-500/20 text-sky-300' },
+                  { id: 'normal', label: 'Normal', activeClass: 'bg-amber-500/20 text-amber-300' },
+                  { id: 'hard', label: 'Hard', activeClass: 'bg-emerald-500/20 text-emerald-300' },
                 ] as const
               ).map((d) => (
                 <button
@@ -1115,10 +1104,10 @@ export function Simulator({
                   type="button"
                   onClick={() => onChangeDifficulty(d.id)}
                   className={cn(
-                    'px-3 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0',
+                    'px-2 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
                     difficulty === d.id
                       ? cn(d.activeClass, 'font-semibold')
-                      : 'text-gray-400 hover:text-white'
+                      : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
                   )}
                 >
                   {d.label}
@@ -1127,184 +1116,189 @@ export function Simulator({
             </div>
           </div>
 
-          <label className="flex items-center space-x-2 text-sm text-gray-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showDrumBaseLayer}
-              disabled={drumEvents.length === 0}
-              onChange={(e) => setShowDrumBaseLayer(e.target.checked)}
-              className="rounded border-gray-700 text-emerald-500 focus:ring-emerald-500 bg-gray-800 w-4 h-4 cursor-pointer disabled:opacity-40"
-            />
-            <span>Show Drum-Mapped Keys (Overdub)</span>
-          </label>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <label className="flex items-center gap-1.5 text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showDrumBaseLayer}
+                disabled={drumEvents.length === 0}
+                onChange={(e) => setShowDrumBaseLayer(e.target.checked)}
+                className="rounded border-gray-700 text-emerald-500 focus:ring-emerald-500 bg-transparent w-3.5 h-3.5 cursor-pointer disabled:opacity-40"
+              />
+              <span>Drum Keys</span>
+            </label>
 
-          {drumEvents.length > 0 && (
-            <div className="flex flex-wrap items-center gap-3 text-xs pt-1">
-              <span className="text-amber-400">K: Kick</span>
-              <span className="text-emerald-400">C: Clap</span>
-              <span className="text-sky-400">H: Hat</span>
-              {drumEvents.some((e) => e.color === 'pink' || (e.band !== 'kick' && e.band !== 'snare' && e.band !== 'hat')) && (
-                <span className="text-pink-400">T: Custom/Tom</span>
-              )}
-              <span className="text-rose-400">U: User</span>
+            {drumEvents.length > 0 && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-amber-400">K</span>
+                <span className="text-emerald-400">C</span>
+                <span className="text-sky-400">H</span>
+                {drumEvents.some((e) => e.color === 'pink' || (e.band !== 'kick' && e.band !== 'snare' && e.band !== 'hat')) && (
+                  <span className="text-pink-400">T</span>
+                )}
+                <span className="text-rose-400">U</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Audio Level & Stem Audition Mode */}
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-gray-400 shrink-0">Audio</span>
+          <div className="flex items-center gap-1 flex-1 min-w-0">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.02}
+              value={trackVolume}
+              onChange={(e) => onChangeTrackVolume?.(parseFloat(e.target.value))}
+              aria-label="Audio volume"
+              className="w-full accent-emerald-500 h-1.5 cursor-pointer"
+            />
+            <span className="text-xs font-mono tabular-nums text-gray-400 w-9 text-right shrink-0">
+              {Math.round(trackVolume * 100)}%
+            </span>
+          </div>
+          {hasDrumStem && onChangeAuditionMode && (
+            <div className="inline-flex items-center gap-0.5 shrink-0">
+              {(
+                [
+                  { id: 'mix', label: 'Mix' },
+                  { id: 'drums', label: 'Drums' },
+                  { id: 'blend', label: 'Blend' },
+                ] as const
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => onChangeAuditionMode(m.id)}
+                  className={cn(
+                    'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0',
+                    auditionMode === m.id
+                      ? 'bg-emerald-500 text-gray-950 font-semibold'
+                      : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+                  )}
+                >
+                  {m.label}
+                </button>
+              ))}
             </div>
           )}
+        </div>
 
-          {/* Audio Level & Stem Audition Mode */}
-          <div className="pt-2 border-t border-gray-800 flex items-center justify-between gap-2">
-            <span className="text-xs text-gray-400 shrink-0">Audio</span>
-            <div className="flex items-center gap-1.5 flex-1 min-w-0">
+        {/* Perfect Hit Sound Simulation (Demo / Sync / Input + Flat Band Toggles) */}
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className="text-xs text-gray-400">Sim Sound</span>
+              <select
+                value={simSoundMode}
+                onChange={(e) => onChangeSimSoundMode?.(e.target.value as SimSoundMode)}
+                className="bg-transparent hover:bg-white/[0.06] rounded-sm px-1.5 py-0.5 text-xs font-medium text-gray-200 focus:outline-none cursor-pointer"
+                title="Demo: plays chart sounds & ignores input (Demotest Score) · Sync: plays chart sounds regardless of input · Input: plays only on player input"
+              >
+                <option value="demo" className="bg-gray-950 text-gray-200">
+                  Demo
+                </option>
+                <option value="sync" className="bg-gray-950 text-gray-200">
+                  Sync
+                </option>
+                <option value="input" className="bg-gray-950 text-gray-200">
+                  Input
+                </option>
+              </select>
+            </div>
+            <div className="flex items-center gap-1 flex-1 min-w-0 max-w-[11rem]">
               <input
                 type="range"
                 min={0}
                 max={1}
                 step={0.02}
-                value={trackVolume}
-                onChange={(e) => onChangeTrackVolume?.(parseFloat(e.target.value))}
-                aria-label="Audio volume"
-                className="w-full accent-emerald-500 h-1.5 cursor-pointer"
+                value={simVolume}
+                onChange={(e) => onChangeSimVolume?.(parseFloat(e.target.value))}
+                aria-label="Simulated hit sound volume"
+                className="w-full accent-sky-400 h-1.5 cursor-pointer"
               />
-              <span className="text-[11px] font-mono tabular-nums text-gray-400 w-8 text-right shrink-0">
-                {Math.round(trackVolume * 100)}%
+              <span className="text-xs font-mono tabular-nums text-gray-400 w-9 text-right shrink-0">
+                {Math.round(simVolume * 100)}%
               </span>
             </div>
-            {hasDrumStem && onChangeAuditionMode && (
-              <div className="inline-flex p-0.5 bg-gray-950 border border-gray-800 rounded-md shrink-0">
-                {(
-                  [
-                    { id: 'mix', label: 'Mix' },
-                    { id: 'drums', label: 'Drums' },
-                    { id: 'blend', label: 'Blend' },
-                  ] as const
-                ).map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => onChangeAuditionMode(m.id)}
-                    className={cn(
-                      'px-2 py-1 text-xs rounded transition-colors whitespace-nowrap shrink-0',
-                      auditionMode === m.id
-                        ? 'bg-emerald-500 text-gray-950 font-semibold'
-                        : 'text-gray-400 hover:text-white'
-                    )}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
-
-          {/* Perfect Hit Sound Simulation (Demo / Sync / Input + Band Toggles) */}
-          <div className="pt-2 border-t border-gray-800 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 shrink-0">
-                <span className="text-xs text-gray-400">Sim Sound</span>
-                <select
-                  value={simSoundMode}
-                  onChange={(e) => onChangeSimSoundMode?.(e.target.value as SimSoundMode)}
-                  className="bg-gray-950 border border-gray-800 rounded px-1.5 py-0.5 text-[11px] font-medium text-gray-200 focus:outline-none focus:border-sky-500 cursor-pointer"
-                  title="Demo: plays chart sounds & ignores input (Demotest Score) · Sync: plays chart sounds regardless of input · Input: plays only on player input"
+          <div
+            className={cn(
+              'grid gap-0.5',
+              hasTomBand ? 'grid-cols-4' : 'grid-cols-3'
+            )}
+          >
+            {(
+              [
+                {
+                  id: 'kick',
+                  label: 'Kick',
+                  activeClass: 'bg-amber-500/20 text-amber-300 font-semibold',
+                },
+                {
+                  id: 'snare',
+                  label: 'Snare',
+                  activeClass: 'bg-emerald-500/20 text-emerald-300 font-semibold',
+                },
+                {
+                  id: 'hat',
+                  label: 'Hi-Hat',
+                  activeClass: 'bg-sky-500/20 text-sky-300 font-semibold',
+                },
+                ...(hasTomBand
+                  ? [
+                      {
+                        id: 'tom',
+                        label: 'Tom',
+                        activeClass: 'bg-pink-500/20 text-pink-300 font-semibold',
+                      } as const,
+                    ]
+                  : []),
+              ] as const
+            ).map((lane) => {
+              const isOn = simSoundEnabled[lane.id];
+              return (
+                <button
+                  key={lane.id}
+                  type="button"
+                  aria-pressed={isOn}
+                  onClick={() =>
+                    onChangeSimSoundEnabled?.({
+                      ...simSoundEnabled,
+                      [lane.id]: !isOn,
+                    })
+                  }
+                  className={cn(
+                    'px-1.5 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0 flex items-center justify-center gap-1',
+                    isOn
+                      ? lane.activeClass
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                  )}
                 >
-                  <option value="demo" className="bg-gray-900 text-gray-200">
-                    Demo
-                  </option>
-                  <option value="sync" className="bg-gray-900 text-gray-200">
-                    Sync
-                  </option>
-                  <option value="input" className="bg-gray-900 text-gray-200">
-                    Input
-                  </option>
-                </select>
-              </div>
-              <div className="flex items-center gap-1.5 flex-1 min-w-0 max-w-[165px]">
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.02}
-                  value={simVolume}
-                  onChange={(e) => onChangeSimVolume?.(parseFloat(e.target.value))}
-                  aria-label="Simulated hit sound volume"
-                  className="w-full accent-sky-400 h-1.5 cursor-pointer"
-                />
-                <span className="text-[11px] font-mono tabular-nums text-gray-400 w-8 text-right shrink-0">
-                  {Math.round(simVolume * 100)}%
-                </span>
-              </div>
-            </div>
-            <div className={cn('grid gap-1.5', hasTomBand ? 'grid-cols-4' : 'grid-cols-3')}>
-              {(
-                [
-                  {
-                    id: 'kick',
-                    label: 'Kick',
-                    activeClass: 'bg-amber-500/20 border-amber-500/60 text-amber-300 font-semibold',
-                  },
-                  {
-                    id: 'snare',
-                    label: 'Snare',
-                    activeClass:
-                      'bg-emerald-500/20 border-emerald-500/60 text-emerald-300 font-semibold',
-                  },
-                  {
-                    id: 'hat',
-                    label: 'Hi-Hat',
-                    activeClass: 'bg-sky-500/20 border-sky-500/60 text-sky-300 font-semibold',
-                  },
-                  ...(hasTomBand
-                    ? [
-                        {
-                          id: 'tom',
-                          label: 'Tom',
-                          activeClass:
-                            'bg-pink-500/20 border-pink-500/60 text-pink-300 font-semibold',
-                        } as const,
-                      ]
-                    : []),
-                ] as const
-              ).map((lane) => {
-                const isOn = simSoundEnabled[lane.id];
-                return (
-                  <button
-                    key={lane.id}
-                    type="button"
-                    aria-pressed={isOn}
-                    onClick={() =>
-                      onChangeSimSoundEnabled?.({
-                        ...simSoundEnabled,
-                        [lane.id]: !isOn,
-                      })
-                    }
-                    className={cn(
-                      'px-2 py-1 text-xs rounded-md border transition-colors whitespace-nowrap shrink-0 flex items-center justify-center gap-1',
-                      isOn
-                        ? lane.activeClass
-                        : 'bg-gray-950 border-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-700'
-                    )}
-                  >
-                    <span>{lane.label}</span>
-                    <span className="text-[10px] opacity-75">{isOn ? 'ON' : 'OFF'}</span>
-                  </button>
-                );
-              })}
-            </div>
+                  <span>{lane.label}</span>
+                  <span className="text-xs opacity-75">{isOn ? 'ON' : 'OFF'}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* Live Playtest / Demotest Score Card */}
-        <div className="p-3 bg-gray-900 rounded-lg border border-gray-800 space-y-2.5">
+        {/* Flat Live Playtest / Demotest Score */}
+        <div className="space-y-1.5 pt-1">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <h4 className="text-sm font-medium text-gray-300">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-300">
                 {simSoundMode === 'demo' ? 'Demotest Score' : 'Playtest Score'}
               </h4>
               <span className="text-xs text-gray-500">
                 {isRecording
                   ? 'Recording'
                   : simSoundMode === 'demo'
-                  ? 'Demo Auto-Play'
-                  : 'Tap D F J K'}
+                  ? 'Auto-Play'
+                  : 'D F J K'}
               </span>
             </div>
             <button
@@ -1318,28 +1312,28 @@ export function Simulator({
             </button>
           </div>
 
-          <div className="grid grid-cols-3 gap-2 pt-0.5 text-center">
+          <div className="grid grid-cols-3 gap-1 text-center">
             <div>
-              <div className="text-lg font-mono tabular-nums font-bold text-emerald-400">
+              <div className="text-base font-mono tabular-nums font-bold text-emerald-400">
                 {playScore.accuracy.toFixed(1)}%
               </div>
-              <div className="text-[11px] text-gray-500">Accuracy</div>
+              <div className="text-xs text-gray-500">Accuracy</div>
             </div>
             <div>
-              <div className="text-lg font-mono tabular-nums font-bold text-white">
+              <div className="text-base font-mono tabular-nums font-bold text-white">
                 {playScore.combo}
               </div>
-              <div className="text-[11px] text-gray-500">Combo</div>
+              <div className="text-xs text-gray-500">Combo</div>
             </div>
             <div>
-              <div className="text-lg font-mono tabular-nums font-bold text-amber-300">
+              <div className="text-base font-mono tabular-nums font-bold text-amber-300">
                 {playScore.maxCombo}
               </div>
-              <div className="text-[11px] text-gray-500">Max Combo</div>
+              <div className="text-xs text-gray-500">Max</div>
             </div>
           </div>
 
-          <div className="pt-2 border-t border-gray-800 grid grid-cols-3 gap-x-3 gap-y-1 text-xs font-mono tabular-nums">
+          <div className="grid grid-cols-3 gap-x-3 gap-y-0.5 text-xs font-mono tabular-nums">
             <div className="flex items-center justify-between">
               <span className="text-cyan-300">Marv</span>
               <span className="text-gray-200">{playScore.counts.marvelous}</span>
@@ -1367,15 +1361,15 @@ export function Simulator({
           </div>
 
           {playScore.lastTier && (
-            <div className="pt-1.5 border-t border-gray-800 flex items-center justify-between text-xs font-mono tabular-nums">
+            <div className="flex items-center justify-between text-xs font-mono tabular-nums">
               <span className={TIER_META[playScore.lastTier].textClass}>
                 {TIER_META[playScore.lastTier].label}
               </span>
               <span className="text-gray-400">
                 {playScore.lastOffsetMs === null
-                  ? 'Missed window'
+                  ? 'Missed'
                   : playScore.lastOffsetMs === 0
-                  ? '0 ms (Exact)'
+                  ? '0 ms'
                   : `${playScore.lastOffsetMs > 0 ? '+' : ''}${playScore.lastOffsetMs} ms (${
                       playScore.lastOffsetMs < 0 ? 'Early' : 'Late'
                     })`}
@@ -1384,81 +1378,93 @@ export function Simulator({
           )}
         </div>
 
-        {/* Event Import Settings */}
-        <div className="space-y-4 p-4 bg-gray-900 rounded-lg border border-gray-800">
-          <h4 className="text-sm font-medium text-gray-300">Recording & Import Settings</h4>
-          <label className="flex items-center space-x-2 text-sm text-gray-300 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoQuantize}
-              onChange={(e) => setAutoQuantize && setAutoQuantize(e.target.checked)}
-              className="rounded border-gray-700 text-emerald-500 focus:ring-emerald-500 bg-gray-800 w-4 h-4 cursor-pointer"
-            />
-            <span>Quantize imports & taps to nearest 16th</span>
-          </label>
+        {/* Collapsible Recording & Calibration Settings (collapsed by default) */}
+        <div>
+          <button
+            type="button"
+            onClick={() => setImportSettingsOpen((v) => !v)}
+            className="w-full py-0.5 flex items-center justify-between text-xs text-gray-300 hover:text-white transition-colors"
+            aria-expanded={importSettingsOpen}
+          >
+            <span className="font-medium">
+              Calibration & Import{' '}
+              <span className="text-gray-500 font-mono tabular-nums">
+                ({delayCompensation.toFixed(3)}s · {autoQuantize ? '16th' : 'Raw'})
+              </span>
+            </span>
+            {importSettingsOpen ? (
+              <ChevronUp className="w-3.5 h-3.5 text-gray-400" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+            )}
+          </button>
 
-          <div className="space-y-1 pt-2">
-            <div className="flex justify-between text-xs text-gray-400">
-              <span>Delay Compensation</span>
-              <span className="font-mono tabular-nums">{delayCompensation.toFixed(3)}s</span>
+          {importSettingsOpen && (
+            <div className="pt-1 space-y-1.5">
+              <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoQuantize}
+                  onChange={(e) => setAutoQuantize && setAutoQuantize(e.target.checked)}
+                  className="rounded border-gray-700 text-emerald-500 focus:ring-emerald-500 bg-transparent w-3.5 h-3.5 cursor-pointer"
+                />
+                <span>Quantize imports & taps to nearest 16th</span>
+              </label>
+
+              <div className="space-y-0.5">
+                <div className="flex justify-between text-xs text-gray-400">
+                  <span>Delay Compensation</span>
+                  <span className="font-mono tabular-nums">{delayCompensation.toFixed(3)}s</span>
+                </div>
+                <input
+                  type="range"
+                  min="-0.5"
+                  max="0.5"
+                  step="0.005"
+                  value={delayCompensation}
+                  onChange={(e) => setDelayCompensation && setDelayCompensation(parseFloat(e.target.value))}
+                  className="w-full accent-emerald-500"
+                />
+              </div>
             </div>
-            <input
-              type="range"
-              min="-0.5"
-              max="0.5"
-              step="0.005"
-              value={delayCompensation}
-              onChange={(e) => setDelayCompensation && setDelayCompensation(parseFloat(e.target.value))}
-              className="w-full accent-emerald-500"
-            />
-          </div>
+          )}
         </div>
 
-        {/* Action Buttons */}
-        <div className="flex flex-col space-y-4">
+        {/* Flat Action Strip */}
+        <div className="space-y-1.5">
           {(calibrationPhaseState !== 'IDLE' || calibrationStats) && (
             <div
-              className={`w-full p-3 text-sm text-center rounded border ${
+              className={`w-full px-2 py-1 text-xs text-center rounded-sm ${
                 calibrationPhaseState === 'SUCCESS' || (calibrationPhaseState === 'IDLE' && calibrationStats)
-                  ? 'border-emerald-500 text-emerald-400 bg-emerald-500/10'
+                  ? 'text-emerald-400 bg-emerald-500/10'
                   : calibrationPhaseState === 'FAILED'
-                  ? 'border-red-500 text-red-400 bg-red-500/10'
-                  : 'border-blue-500 text-blue-400 bg-blue-500/10'
+                  ? 'text-red-400 bg-red-500/10'
+                  : 'text-blue-400 bg-blue-500/10'
               }`}
             >
-              <div className="font-medium flex items-center justify-center space-x-2">
-                <span>{calibrationMessage}</span>
-              </div>
+              <div className="font-medium">{calibrationMessage}</div>
 
               {calibrationPhaseState === 'TESTING' && (
-                <div className="mt-2 text-xs opacity-80 grid grid-cols-1 gap-2 text-center bg-black/20 p-2 rounded">
-                  <div className="text-xl font-mono tabular-nums text-blue-300">
-                    {liveTapCount} <span className="text-xs text-gray-400">taps recorded</span>
-                  </div>
+                <div className="mt-1 text-base font-mono tabular-nums text-blue-300">
+                  {liveTapCount} <span className="text-xs text-gray-400">taps recorded</span>
                 </div>
               )}
 
               {calibrationStats && (
-                <div className="mt-2 text-xs opacity-80 grid grid-cols-2 gap-2 text-left bg-black/20 p-2 rounded font-mono tabular-nums">
-                  <div>
-                    <span className="opacity-60">Variance:</span> {calibrationStats.variance.toFixed(5)}
-                  </div>
-                  <div>
-                    <span className="opacity-60">Mean Delay:</span> {(calibrationStats.mean * 1000).toFixed(0)}ms
-                  </div>
-                  <div className="col-span-2">
-                    <span className="opacity-60">Valid Taps (Recent):</span> {calibrationStats.count}
-                  </div>
+                <div className="mt-1 text-xs opacity-85 flex flex-wrap justify-between gap-2 font-mono tabular-nums">
+                  <span>Var: {calibrationStats.variance.toFixed(5)}</span>
+                  <span>Mean: {(calibrationStats.mean * 1000).toFixed(0)}ms</span>
+                  <span>Taps: {calibrationStats.count}</span>
                 </div>
               )}
             </div>
           )}
 
-          <div className="flex space-x-2 w-full justify-center">
+          <div className="flex w-full items-center gap-0.5">
             <button
               onClick={toggleRecording}
-              className={`flex-1 px-2 py-2 text-sm rounded font-medium flex items-center justify-center space-x-2 transition-colors whitespace-nowrap ${
-                isRecording ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-gray-800 hover:bg-gray-700 text-gray-200'
+              className={`flex-1 px-2 py-1 text-xs font-medium rounded-sm flex items-center justify-center transition-colors whitespace-nowrap ${
+                isRecording ? 'bg-red-500 hover:bg-red-600 text-white' : 'hover:bg-white/[0.06] text-gray-200'
               }`}
             >
               <span>{isRecording ? 'Stop' : 'Record / Calibrate'}</span>
@@ -1466,30 +1472,30 @@ export function Simulator({
             <button
               onClick={exportRecording}
               disabled={!canExport}
-              className="flex-1 px-2 py-2 text-sm rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              className="flex-1 px-2 py-1 text-xs rounded-sm hover:bg-white/[0.06] text-gray-200 font-medium disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
             >
               Export JSON
             </button>
-            <label className="flex-1 px-2 py-2 text-sm rounded bg-gray-800 hover:bg-gray-700 text-gray-200 font-medium cursor-pointer flex items-center justify-center whitespace-nowrap">
+            <label className="flex-1 px-2 py-1 text-xs rounded-sm hover:bg-white/[0.06] text-gray-200 font-medium cursor-pointer flex items-center justify-center whitespace-nowrap">
               Load JSON
               <input type="file" accept=".json" className="hidden" onChange={importRecording} />
             </label>
           </div>
 
           {isRecording && (
-            <div className="text-sm text-yellow-400 text-center">
-              Press Arrow keys / D F J K (or any key except Space) to record overdub steps!
+            <div className="text-xs text-yellow-400 text-center">
+              Press Arrow keys or D F J K to record overdub steps!
             </div>
           )}
           {recordedEvents.length > 0 && !isRecording && (
-            <div className="flex items-center justify-between text-xs text-gray-400 px-1">
+            <div className="flex items-center justify-between text-xs text-gray-400">
               <span className="font-mono tabular-nums">{recordedEvents.length} user events recorded</span>
               <button
                 type="button"
                 onClick={() => setRecordedEvents([])}
                 className="text-gray-500 hover:text-red-400 transition-colors"
               >
-                Clear User Taps
+                Clear Taps
               </button>
             </div>
           )}
