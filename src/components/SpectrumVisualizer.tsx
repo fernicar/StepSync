@@ -325,21 +325,23 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
           }
         }
       } else {
-        // Landscape Mode: rolling dot-matrix waterfall terrain (oldest back-top -> newest front-bottom)
+        // Landscape Mode: rolling dot-matrix waterfall terrain (newest back-horizon -> oldest front-bottom foreground)
         const slices = historyRef.current;
         const total = slices.length;
         const baseY = topPad + plotH;
 
-        for (let r = 0; r < total; r++) {
+        // Iterate newest (horizon, back) -> oldest (foreground, front) for proper painter occlusion
+        for (let r = total - 1; r >= 0; r--) {
           const slice = slices[r];
-          const depthRatio = total > 1 ? r / (total - 1) : 1; // 0 = oldest (back), 1 = newest (front)
-          const invDepth = 1 - depthRatio;
-          const rowBaseY = baseY - invDepth * (plotH * 0.52);
-          const xInset = invDepth * width * 0.055;
+          const ageRatio = total > 1 ? (total - 1 - r) / (total - 1) : 0; // 0 = newest (horizon), 1 = oldest (foreground)
+          const invAge = 1 - ageRatio; // 1 at horizon, 0 at foreground
+          const rowBaseY = baseY - invAge * (plotH * 0.52);
+          const xInset = invAge * width * 0.055;
           const rowWidth = width - xInset * 2;
-          const rowGain = (0.35 + depthRatio * 0.65) * (plotH * 0.48);
+          const rowGain = (0.2 + invAge * 1.5) * (plotH * 0.48);
+          const intensityBoost = 0.65 + ageRatio * 0.35; // Crisp bright entry right at the horizon
 
-          // Occlusion silhouette so front ridges feel like a real 3D landscape
+          // Occlusion silhouette so advancing foreground ridges cleanly sit over horizon behind
           ctx.beginPath();
           ctx.moveTo(xInset, rowBaseY);
           for (let c = 0; c < colsCount; c++) {
@@ -360,11 +362,11 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
             if (c === 0) ctx.moveTo(cx, cy);
             else ctx.lineTo(cx, cy);
           }
-          ctx.strokeStyle = `rgba(148, 163, 184, ${(0.08 + depthRatio * 0.25).toFixed(2)})`;
+          ctx.strokeStyle = `rgba(148, 163, 184, ${(0.08 + intensityBoost * 0.24).toFixed(2)})`;
           ctx.lineWidth = 1;
           ctx.stroke();
 
-          // Luminous dot peaks across bass -> treble
+          // Luminous dot peaks across bass -> treble advancing forward from horizon
           for (let c = 0; c < colsCount; c++) {
             const amp = slice[c];
             if (amp < 0.03) continue;
@@ -372,8 +374,8 @@ export function SpectrumVisualizer({ isPlaying, hasAudio, hasDrumStem, onSoloBan
             const cy = rowBaseY - amp * rowGain;
             const centerHz = Math.exp(LOG_MIN + (c / (colsCount - 1)) * (LOG_MAX - LOG_MIN));
             ctx.fillStyle = colorForFreq(centerHz);
-            ctx.globalAlpha = Math.min(1, 0.2 + depthRatio * 0.75 + amp * 0.25);
-            const dotR = 1.1 + depthRatio * 0.9 + amp * 0.9;
+            ctx.globalAlpha = Math.min(1, 0.25 + intensityBoost * 0.65 + amp * 0.25);
+            const dotR = 1.0 + ageRatio * 0.9 + amp * 0.95;
             ctx.beginPath();
             ctx.arc(cx, cy, dotR, 0, Math.PI * 2);
             ctx.fill();

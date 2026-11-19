@@ -21,6 +21,7 @@ export class AudioEngine {
   private simLimiterNode: DynamicsCompressorNode | null = null;
   private outputAnalyser: AnalyserNode | null = null;
   private drumAnalyser: AnalyserNode | null = null;
+  private mediaStreamDest: MediaStreamAudioDestinationNode | null = null;
   private soloHp1: BiquadFilterNode | null = null;
   private soloHp2: BiquadFilterNode | null = null;
   private soloLp1: BiquadFilterNode | null = null;
@@ -237,6 +238,19 @@ export class AudioEngine {
 
   public getSampleRate(): number {
     return this.audioCtx?.sampleRate || this.buffer?.sampleRate || 44100;
+  }
+
+  public getCaptureAudioStream(): MediaStream | null {
+    this.initCtx();
+    if (!this.audioCtx || !this.outputAnalyser) return null;
+    if (this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume();
+    }
+    if (!this.mediaStreamDest) {
+      this.mediaStreamDest = this.audioCtx.createMediaStreamDestination();
+      this.outputAnalyser.connect(this.mediaStreamDest);
+    }
+    return this.mediaStreamDest.stream;
   }
 
   public setBuffer(buffer: AudioBuffer | null) {

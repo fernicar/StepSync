@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
+import { ChevronDown, ChevronUp, RotateCcw, Settings, Square, Video, X } from 'lucide-react';
 import {
   SyncData,
   Section,
@@ -16,6 +16,19 @@ import { generateDifficultyChart, getEffectiveAltLane } from '../lib/drumAnalysi
 import { AuditionMode } from './StemStudio';
 import { cn } from '../lib/utils';
 import { triggerBlobDownload } from '../lib/projectCache';
+import {
+  ScreensaverExportHandle,
+  ScreensaverVisualizer,
+  ScreensaverWebmExportState,
+} from './ScreensaverVisualizer';
+import type { InputPercussionTrigger } from '../lib/rhythmBodyLanguage';
+
+function formatDurationClock(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${String(rem).padStart(2, '0')}`;
+}
 
 interface ScoreSummary {
   counts: Record<JudgementTier, number>;
@@ -141,9 +154,45 @@ export function Simulator({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  const [simViewMode, setSimViewMode] = useState<'stepmania' | 'screensaver'>('stepmania');
+
+  const [pinkPantherPct, setPinkPantherPct] = useState(20);
+  const [percussionPct, setPercussionPct] = useState(200);
+  const [snareCounterKick, setSnareCounterKick] = useState(true);
+  const [simpleBarOrientation, setSimpleBarOrientation] = useState(true);
+
+  const screensaverExportRef = useRef<ScreensaverExportHandle | null>(null);
+  const [exportWidth, setExportWidth] = useState(1280);
+  const [exportHeight, setExportHeight] = useState(720);
+  const [exportSettingsOpen, setExportSettingsOpen] = useState(false);
+  const [webmExportState, setWebmExportState] = useState<ScreensaverWebmExportState>({
+    status: 'idle',
+    elapsedSec: 0,
+    durationSec: 0,
+    error: null,
+    lastFileName: null,
+  });
+
+  useEffect(() => {
+    if (simViewMode !== 'screensaver') {
+      setWebmExportState((prev) =>
+        prev.status === 'idle'
+          ? prev
+          : { status: 'idle', elapsedSec: 0, durationSec: 0, error: null, lastFileName: prev.lastFileName }
+      );
+    }
+  }, [simViewMode]);
+
   const [isRecording, setIsRecording] = useState(false);
   const [recordedEvents, setRecordedEvents] = useState<RecordedTap[]>([]);
   const [showDrumBaseLayer, setShowDrumBaseLayer] = useState(true);
+
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const isRecordingRef = useRef(isRecording);
+  isRecordingRef.current = isRecording;
+  const showDrumBaseLayerRef = useRef(showDrumBaseLayer);
+  showDrumBaseLayerRef.current = showDrumBaseLayer;
 
   const calibrationPhaseRef = useRef<'IDLE' | 'TESTING' | 'FAILED' | 'SUCCESS'>('IDLE');
   const [calibrationPhaseState, setCalibrationPhaseState] = useState<'IDLE' | 'TESTING' | 'FAILED' | 'SUCCESS'>('IDLE');
@@ -329,6 +378,8 @@ export function Simulator({
     atMs: number;
   } | null>(null);
   const prevTrackTimeRef = useRef<number | null>(null);
+  const playerInputTriggersRef = useRef<InputPercussionTrigger[]>([]);
+  const playerHatParityCounterRef = useRef(0);
 
   const simSoundModeRef = useRef(simSoundMode);
   simSoundModeRef.current = simSoundMode;
@@ -339,6 +390,7 @@ export function Simulator({
 
   const resetPlayScore = useCallback(() => {
     judgedNotesRef.current.clear();
+    playerInputTriggersRef.current = [];
     scoreMutableRef.current = {
       ...INITIAL_SCORE,
       counts: { marvelous: 0, perfect: 0, great: 0, good: 0, boo: 0, miss: 0 },
@@ -359,6 +411,9 @@ export function Simulator({
 
   const prevSimSoundModeRef = useRef<SimSoundMode>(simSoundMode);
   useEffect(() => {
+    if (simSoundMode !== 'input') {
+      playerInputTriggersRef.current = [];
+    }
     if (prevSimSoundModeRef.current !== simSoundMode) {
       if (simSoundMode === 'demo' || prevSimSoundModeRef.current === 'demo') {
         resetPlayScore();
@@ -406,24 +461,21 @@ export function Simulator({
       });
     };
 
-    const playInputLaneSound = (explicitLane: LaneIndex, hitBand?: string) => {
-      if (simSoundModeRef.current !== 'input') return;
-      const enabled = simSoundEnabledRef.current;
+    const resolveInputSimBand = (explicitLane: LaneIndex, hitBand?: string): SimDrumBand => {
       if (hitBand) {
         const matched = bandToSimBand(hitBand);
-        if (matched && enabled[matched]) {
-          engine.playClick(matched, undefined, 'sim');
-          return;
+        if (matched) return matched;
+      }
+      for (const rule of laneRulesRef.current) {
+        if (rule.lane === explicitLane) {
+          const sb = bandToSimBand(rule.id);
+          if (sb) return sb;
         }
       }
       for (const rule of laneRulesRef.current) {
-        const alt = getEffectiveAltLane(rule);
-        if (rule.lane === explicitLane || alt === explicitLane) {
+        if (getEffectiveAltLane(rule) === explicitLane) {
           const sb = bandToSimBand(rule.id);
-          if (sb && enabled[sb]) {
-            engine.playClick(sb, undefined, 'sim');
-            return;
-          }
+          if (sb) return sb;
         }
       }
       const fallbackMap: Record<LaneIndex, SimDrumBand> = {
@@ -432,9 +484,34 @@ export function Simulator({
         2: 'kick',
         3: 'snare',
       };
-      const fb = fallbackMap[explicitLane];
-      if (enabled[fb]) {
-        engine.playClick(fb, undefined, 'sim');
+      return fallbackMap[explicitLane];
+    };
+
+    const recordInputWheelTrigger = (explicitLane: LaneIndex, resolvedBand: SimDrumBand) => {
+      if (simSoundModeRef.current !== 'input') return;
+      const nowSec = performance.now() / 1000;
+      const trig: InputPercussionTrigger = {
+        wallTimeSec: nowSec,
+        band: resolvedBand,
+        lane: explicitLane,
+        hatParity:
+          resolvedBand === 'hat'
+            ? ((playerHatParityCounterRef.current++ % 2 === 0 ? 'A' : 'B') as 'A' | 'B')
+            : undefined,
+      };
+      const arr = playerInputTriggersRef.current;
+      const pruned = arr.filter((item) => nowSec - item.wallTimeSec <= 1.2);
+      pruned.push(trig);
+      playerInputTriggersRef.current = pruned;
+    };
+
+    const playInputLaneSound = (explicitLane: LaneIndex, hitBand?: string) => {
+      const resolved = resolveInputSimBand(explicitLane, hitBand);
+      recordInputWheelTrigger(explicitLane, resolved);
+      if (simSoundModeRef.current !== 'input') return;
+      const enabled = simSoundEnabledRef.current;
+      if (enabled[resolved]) {
+        engine.playClick(resolved, undefined, 'sim');
       }
     };
 
@@ -636,7 +713,118 @@ export function Simulator({
     triggerBlobDownload(blob, 'recorded-events.json');
   };
 
+  // Shared Demo auto-play & Input auto-miss sweep used by both StepMania and Screensaver views
+  const evaluatePlaybackJudgement = useCallback((currentTime: number) => {
+    const chartEvents = drumEventsRef.current;
+    const hasMapped = showDrumBaseLayerRef.current && chartEvents.length > 0;
+    if (isRecordingRef.current || calibrationPhaseRef.current !== 'IDLE' || !hasMapped) {
+      prevTrackTimeRef.current = currentTime;
+      return;
+    }
+
+    const evalTime = currentTime - delayCompRef.current;
+    const prevTime = prevTrackTimeRef.current;
+
+    if (simSoundModeRef.current === 'demo') {
+      if (prevTime !== null && prevTime - currentTime > 2.0 && engine.getLoop()) {
+        judgedNotesRef.current.clear();
+      } else if (prevTime === null || Math.abs(currentTime - prevTime) > 0.5) {
+        for (let i = 0; i < chartEvents.length; i++) {
+          if (chartEvents[i].time < currentTime && !judgedNotesRef.current.has(i)) {
+            judgedNotesRef.current.set(i, 'skipped');
+          }
+        }
+      } else if ((isPlayingRef.current || engine.getIsPlaying()) && currentTime >= prevTime) {
+        let demoHits = 0;
+        for (let i = 0; i < chartEvents.length; i++) {
+          if (judgedNotesRef.current.has(i)) continue;
+          if (chartEvents[i].time <= currentTime) {
+            judgedNotesRef.current.set(i, 'marvelous');
+            demoHits++;
+          } else {
+            break;
+          }
+        }
+
+        if (demoHits > 0) {
+          const s = scoreMutableRef.current;
+          s.counts.marvelous += demoHits;
+          s.totalJudged += demoHits;
+          s.weightedSum += demoHits * TIER_WEIGHT.marvelous;
+          s.combo += demoHits;
+          s.maxCombo = Math.max(s.maxCombo, s.combo);
+          s.accuracy = s.totalJudged > 0 ? (s.weightedSum / s.totalJudged) * 100 : 100;
+          s.lastTier = 'marvelous';
+          s.lastOffsetMs = 0;
+          lastJudgementHudRef.current = {
+            tier: 'marvelous',
+            offsetMs: 0,
+            combo: s.combo,
+            atMs: performance.now(),
+          };
+          setPlayScore({
+            counts: { ...s.counts },
+            combo: s.combo,
+            maxCombo: s.maxCombo,
+            accuracy: s.accuracy,
+            lastTier: 'marvelous',
+            lastOffsetMs: 0,
+          });
+        }
+      }
+      prevTrackTimeRef.current = currentTime;
+      return;
+    }
+
+    if (prevTime !== null && prevTime - currentTime > 2.0 && engine.getLoop()) {
+      judgedNotesRef.current.clear();
+    } else if (prevTime === null || Math.abs(currentTime - prevTime) > 0.5) {
+      for (let i = 0; i < chartEvents.length; i++) {
+        if (chartEvents[i].time < evalTime - 0.18 && !judgedNotesRef.current.has(i)) {
+          judgedNotesRef.current.set(i, 'skipped');
+        }
+      }
+    } else if ((isPlayingRef.current || engine.getIsPlaying()) && currentTime >= prevTime) {
+      let newMisses = 0;
+      for (let i = 0; i < chartEvents.length; i++) {
+        if (judgedNotesRef.current.has(i)) continue;
+        if (chartEvents[i].time < evalTime - 0.18) {
+          judgedNotesRef.current.set(i, 'miss');
+          newMisses++;
+        } else if (chartEvents[i].time > evalTime) {
+          break;
+        }
+      }
+
+      if (newMisses > 0) {
+        const s = scoreMutableRef.current;
+        s.counts.miss += newMisses;
+        s.totalJudged += newMisses;
+        s.combo = 0;
+        s.accuracy = s.totalJudged > 0 ? (s.weightedSum / s.totalJudged) * 100 : 100;
+        s.lastTier = 'miss';
+        s.lastOffsetMs = null;
+        lastJudgementHudRef.current = {
+          tier: 'miss',
+          offsetMs: null,
+          combo: 0,
+          atMs: performance.now(),
+        };
+        setPlayScore({
+          counts: { ...s.counts },
+          combo: 0,
+          maxCombo: s.maxCombo,
+          accuracy: s.accuracy,
+          lastTier: 'miss',
+          lastOffsetMs: null,
+        });
+      }
+    }
+    prevTrackTimeRef.current = currentTime;
+  }, []);
+
   useEffect(() => {
+    if (simViewMode !== 'stepmania') return;
     let animationId: number;
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -733,110 +921,7 @@ export function Simulator({
       const hasMappedDrumEvents = showDrumBaseLayer && drumEvents.length > 0;
 
       // Auto-play Demotest OR Play Mode auto-miss sweep & seek/loop wrap detection
-      if (!isRecording && calibrationPhaseRef.current === 'IDLE' && hasMappedDrumEvents) {
-        const evalTime = currentTime - delayCompensation;
-        const prevTime = prevTrackTimeRef.current;
-
-        if (simSoundModeRef.current === 'demo') {
-          if (prevTime !== null && prevTime - currentTime > 2.0 && engine.getLoop()) {
-            judgedNotesRef.current.clear();
-          } else if (prevTime === null || Math.abs(currentTime - prevTime) > 0.5) {
-            for (let i = 0; i < drumEvents.length; i++) {
-              if (drumEvents[i].time < currentTime && !judgedNotesRef.current.has(i)) {
-                judgedNotesRef.current.set(i, 'skipped');
-              }
-            }
-          } else if (isPlaying && currentTime >= prevTime) {
-            let demoHits = 0;
-            for (let i = 0; i < drumEvents.length; i++) {
-              if (judgedNotesRef.current.has(i)) continue;
-              if (drumEvents[i].time <= currentTime) {
-                judgedNotesRef.current.set(i, 'marvelous');
-                demoHits++;
-              } else {
-                break;
-              }
-            }
-
-            if (demoHits > 0) {
-              const s = scoreMutableRef.current;
-              s.counts.marvelous += demoHits;
-              s.totalJudged += demoHits;
-              s.weightedSum += demoHits * TIER_WEIGHT.marvelous;
-              s.combo += demoHits;
-              s.maxCombo = Math.max(s.maxCombo, s.combo);
-              s.accuracy = s.totalJudged > 0 ? (s.weightedSum / s.totalJudged) * 100 : 100;
-              s.lastTier = 'marvelous';
-              s.lastOffsetMs = 0;
-              lastJudgementHudRef.current = {
-                tier: 'marvelous',
-                offsetMs: 0,
-                combo: s.combo,
-                atMs: performance.now(),
-              };
-              setPlayScore({
-                counts: { ...s.counts },
-                combo: s.combo,
-                maxCombo: s.maxCombo,
-                accuracy: s.accuracy,
-                lastTier: 'marvelous',
-                lastOffsetMs: 0,
-              });
-            }
-          }
-          prevTrackTimeRef.current = currentTime;
-        } else {
-          if (prevTime !== null && prevTime - currentTime > 2.0 && engine.getLoop()) {
-            // Looped back to start: allow hitting notes cleanly on the next pass
-            judgedNotesRef.current.clear();
-          } else if (prevTime === null || Math.abs(currentTime - prevTime) > 0.5) {
-            // Seeked or just started mid-track: silently skip already-passed notes
-            for (let i = 0; i < drumEvents.length; i++) {
-              if (drumEvents[i].time < evalTime - 0.18 && !judgedNotesRef.current.has(i)) {
-                judgedNotesRef.current.set(i, 'skipped');
-              }
-            }
-          } else if (isPlaying && currentTime >= prevTime) {
-            let newMisses = 0;
-            for (let i = 0; i < drumEvents.length; i++) {
-              if (judgedNotesRef.current.has(i)) continue;
-              if (drumEvents[i].time < evalTime - 0.18) {
-                judgedNotesRef.current.set(i, 'miss');
-                newMisses++;
-              } else if (drumEvents[i].time > evalTime) {
-                break;
-              }
-            }
-
-            if (newMisses > 0) {
-              const s = scoreMutableRef.current;
-              s.counts.miss += newMisses;
-              s.totalJudged += newMisses;
-              s.combo = 0;
-              s.accuracy = s.totalJudged > 0 ? (s.weightedSum / s.totalJudged) * 100 : 100;
-              s.lastTier = 'miss';
-              s.lastOffsetMs = null;
-              lastJudgementHudRef.current = {
-                tier: 'miss',
-                offsetMs: null,
-                combo: 0,
-                atMs: performance.now(),
-              };
-              setPlayScore({
-                counts: { ...s.counts },
-                combo: 0,
-                maxCombo: s.maxCombo,
-                accuracy: s.accuracy,
-                lastTier: 'miss',
-                lastOffsetMs: null,
-              });
-            }
-          }
-          prevTrackTimeRef.current = currentTime;
-        }
-      } else {
-        prevTrackTimeRef.current = currentTime;
-      }
+      evaluatePlaybackJudgement(currentTime);
 
       // Highlight receptors for Demo / Sync scheduled hits OR live user key presses
       const laneHitFlashColor: Array<string | null> = [null, null, null, null];
@@ -1050,29 +1135,110 @@ export function Simulator({
     sections,
     simSoundEnabled,
     tomBandSet,
+    simViewMode,
+    evaluatePlaybackJudgement,
   ]);
 
   const [importSettingsOpen, setImportSettingsOpen] = useState(false);
 
   const canExport = recordedEvents.length > 0 || (showDrumBaseLayer && drumEvents.length > 0);
+  const effectiveScreensaverEvents = showDrumBaseLayer ? drumEvents : [];
 
   return (
     <div className="flex flex-col md:flex-row gap-4 items-start justify-center w-full">
-      {/* LEFT COLUMN: Simulator Canvas */}
-      <div className="flex flex-col items-center flex-shrink-0">
-        <canvas
-          ref={canvasRef}
-          className="bg-black block"
-          width={360}
-          height={500}
-        />
-        <div className="mt-1.5 text-center text-gray-500 text-xs font-mono">
-          Space: Play/Pause · D F J K / Arrows: Lanes
+      {/* LEFT COLUMN: Nested Simulation Stage Tabs (StepMania | Screensaver) */}
+      <div
+        className={cn(
+          'flex flex-col items-stretch',
+          simViewMode === 'screensaver'
+            ? 'w-full flex-1 min-w-0'
+            : 'w-[360px] flex-shrink-0 items-center'
+        )}
+      >
+        <div className="flex items-center justify-between gap-2 mb-1.5 w-full">
+          <div className="inline-flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={() => setSimViewMode('stepmania')}
+              className={cn(
+                'px-2 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
+                simViewMode === 'stepmania'
+                  ? 'bg-emerald-500 text-gray-950 font-semibold'
+                  : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+              )}
+            >
+              StepMania
+            </button>
+            <button
+              type="button"
+              onClick={() => setSimViewMode('screensaver')}
+              className={cn(
+                'px-2 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
+                simViewMode === 'screensaver'
+                  ? 'bg-emerald-500 text-gray-950 font-semibold'
+                  : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+              )}
+            >
+              Screensaver
+            </button>
+          </div>
+          <span className="text-xs font-mono text-gray-500 truncate">
+            {simViewMode === 'stepmania' ? 'D F J K' : 'D F J K · 1-4 Presets'}
+          </span>
         </div>
+
+        {simViewMode === 'stepmania' ? (
+          <>
+            <canvas
+              ref={canvasRef}
+              className="bg-black block"
+              width={360}
+              height={500}
+            />
+            <div className="mt-1.5 text-center text-gray-500 text-xs font-mono">
+              Space: Play/Pause · D F J K / Arrows: Lanes
+            </div>
+          </>
+        ) : (
+          <ScreensaverVisualizer
+            sync={sync}
+            sections={sections}
+            isPlaying={isPlaying}
+            songDurationSec={audioMeta?.duration || engine.getBuffer()?.duration || 180}
+            drumEvents={effectiveScreensaverEvents}
+            tomBandIds={tomBandIds}
+            difficulty={difficulty}
+            pinkPantherPct={pinkPantherPct}
+            percussionPct={percussionPct}
+            snareCounterKick={snareCounterKick}
+            simpleBarOrientation={simpleBarOrientation}
+            simSoundMode={simSoundMode}
+            simSoundEnabled={simSoundEnabled}
+            pressedLanesRef={pressedLanesRef}
+            judgedNotesRef={judgedNotesRef}
+            lastJudgementHudRef={lastJudgementHudRef}
+            playerInputTriggersRef={playerInputTriggersRef}
+            playScore={playScore}
+            playScoreRef={scoreMutableRef}
+            onPlaybackTick={evaluatePlaybackJudgement}
+            fileName={audioMeta?.fileName}
+            onChangeSimSoundMode={onChangeSimSoundMode}
+            onBeforeDemoExportStart={resetPlayScore}
+            exportHandleRef={screensaverExportRef}
+            onWebmExportStateChange={setWebmExportState}
+            exportWidth={exportWidth}
+            exportHeight={exportHeight}
+          />
+        )}
       </div>
 
       {/* RIGHT COLUMN: Flat Borderless Controls */}
-      <div className="flex flex-col w-full max-w-md space-y-3">
+      <div
+        className={cn(
+          'flex flex-col w-full space-y-3',
+          simViewMode === 'screensaver' ? 'md:w-[22rem] lg:w-[24rem] shrink-0' : 'max-w-md'
+        )}
+      >
         {/* Sync Summary */}
         <div className="flex items-center gap-4 font-mono tabular-nums">
           <div className="flex items-baseline gap-1.5">
@@ -1094,15 +1260,16 @@ export function Simulator({
             <div className="inline-flex items-center gap-0.5">
               {(
                 [
-                  { id: 'easy', label: 'Easy', activeClass: 'bg-sky-500/20 text-sky-300' },
-                  { id: 'normal', label: 'Normal', activeClass: 'bg-amber-500/20 text-amber-300' },
-                  { id: 'hard', label: 'Hard', activeClass: 'bg-emerald-500/20 text-emerald-300' },
+                  { id: 'easy', label: 'Easy', persona: 'Dancer', activeClass: 'bg-sky-500/20 text-sky-300' },
+                  { id: 'normal', label: 'Normal', persona: 'Performer', activeClass: 'bg-amber-500/20 text-amber-300' },
+                  { id: 'hard', label: 'Hard', persona: 'Drummer', activeClass: 'bg-emerald-500/20 text-emerald-300' },
                 ] as const
               ).map((d) => (
                 <button
                   key={d.id}
                   type="button"
                   onClick={() => onChangeDifficulty(d.id)}
+                  title={`${d.label} (${d.persona})`}
                   className={cn(
                     'px-2 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
                     difficulty === d.id
@@ -1110,7 +1277,7 @@ export function Simulator({
                       : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
                   )}
                 >
-                  {d.label}
+                  {simViewMode === 'screensaver' ? `${d.label} · ${d.persona}` : d.label}
                 </button>
               ))}
             </div>
@@ -1141,6 +1308,296 @@ export function Simulator({
             )}
           </div>
         </div>
+
+        {/* Body Language Tuning Sliders & Snare Rule Toggle (outside Screensaver viewport) */}
+        {simViewMode === 'screensaver' && (
+          <div className="space-y-1.5 pt-1">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setPinkPantherPct(0)}
+                className="text-gray-300 hover:text-white shrink-0 whitespace-nowrap text-left"
+                title="Click to jump to 0% (center wheel) to isolate percussion"
+              >
+                Pink Panther
+              </button>
+              <input
+                type="range"
+                min={-200}
+                max={200}
+                step={5}
+                value={pinkPantherPct}
+                onChange={(e) => setPinkPantherPct(parseInt(e.target.value, 10))}
+                aria-label="Pink Panther step scale percentage"
+                className="w-full accent-emerald-500 h-1.5 cursor-pointer"
+              />
+              <button
+                type="button"
+                onClick={() => setPinkPantherPct(20)}
+                className="font-mono tabular-nums text-emerald-300 hover:text-white w-12 text-right shrink-0"
+                title="Click to reset to +20% default"
+              >
+                {pinkPantherPct > 0 ? `+${pinkPantherPct}%` : `${pinkPantherPct}%`}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setPercussionPct(0)}
+                className="text-gray-300 hover:text-white shrink-0 whitespace-nowrap text-left"
+                title="Click to jump to 0% (Pink Panther step only)"
+              >
+                Percussion
+              </button>
+              <input
+                type="range"
+                min={-200}
+                max={200}
+                step={5}
+                value={percussionPct}
+                onChange={(e) => setPercussionPct(parseInt(e.target.value, 10))}
+                aria-label="Percussion perturbation scale percentage"
+                className="w-full accent-amber-400 h-1.5 cursor-pointer"
+              />
+              <button
+                type="button"
+                onClick={() => setPercussionPct(200)}
+                className="font-mono tabular-nums text-amber-300 hover:text-white w-12 text-right shrink-0"
+                title="Click to reset to +200% default"
+              >
+                {percussionPct > 0 ? `+${percussionPct}%` : `${percussionPct}%`}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span
+                className="text-gray-300 whitespace-nowrap"
+                title="OFF pulls pre-snare angle toward 0° center; ON makes Snare counter current Kick orientation"
+              >
+                Snare Counters Kick
+              </span>
+              <button
+                type="button"
+                aria-pressed={snareCounterKick}
+                onClick={() => setSnareCounterKick((v) => !v)}
+                className={cn(
+                  'px-2 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0 font-medium',
+                  snareCounterKick
+                    ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
+                    : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                )}
+              >
+                {snareCounterKick ? 'ON · Opposite Kick' : 'OFF · Rebound 0°'}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span
+                className="text-gray-300 whitespace-nowrap"
+                title="OFF follows L&R&L&L / R&L&R&R step orientation; ON holds Bar A Left and Bar B Right for percussion"
+              >
+                Drum Orientation
+              </span>
+              <button
+                type="button"
+                aria-pressed={simpleBarOrientation}
+                onClick={() => setSimpleBarOrientation((v) => !v)}
+                className={cn(
+                  'px-2 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0 font-medium',
+                  simpleBarOrientation
+                    ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
+                    : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                )}
+              >
+                {simpleBarOrientation ? 'ON · Bar A: L · B: R' : 'OFF · Step L&R&L&L'}
+              </button>
+            </div>
+
+            {/* Configurable Demo Video Export (.webm, default 1280×720) */}
+            <div className="pt-1.5 border-t border-white/[0.06] space-y-1.5">
+              {webmExportState.status === 'idle' ? (
+                <>
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="text-gray-400 whitespace-nowrap">Demo Video</span>
+                    <div className="inline-flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        aria-expanded={exportSettingsOpen}
+                        onClick={() => setExportSettingsOpen((v) => !v)}
+                        className={cn(
+                          'inline-flex items-center justify-center p-1 rounded-sm transition-colors',
+                          exportSettingsOpen
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'text-gray-400 hover:text-white hover:bg-white/[0.08]'
+                        )}
+                        title="Configure WebM export width and height (default 1280×720)"
+                        aria-label="Export resolution settings"
+                      >
+                        <Settings className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          screensaverExportRef.current?.startDemoWebmExport({
+                            width: exportWidth,
+                            height: exportHeight,
+                          })
+                        }
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-sm bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 transition-colors whitespace-nowrap shrink-0"
+                        title={`Render Demo playback (with active preset & audio) to a ${exportWidth}×${exportHeight} .webm video`}
+                      >
+                        <Video className="w-3.5 h-3.5" />
+                        <span>
+                          Export WebM · {exportWidth}×{exportHeight}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {exportSettingsOpen && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-white/[0.03] border border-white/[0.06] text-xs">
+                      <div className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExportWidth(1280);
+                            setExportHeight(720);
+                          }}
+                          className={cn(
+                            'px-1.5 py-0.5 rounded-sm font-mono tabular-nums transition-colors',
+                            exportWidth === 1280 && exportHeight === 720
+                              ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
+                              : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+                          )}
+                        >
+                          1280×720
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setExportWidth(1920);
+                            setExportHeight(1080);
+                          }}
+                          className={cn(
+                            'px-1.5 py-0.5 rounded-sm font-mono tabular-nums transition-colors',
+                            exportWidth === 1920 && exportHeight === 1080
+                              ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
+                              : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+                          )}
+                        >
+                          1920×1080
+                        </button>
+                      </div>
+                      <div className="inline-flex items-center gap-1 font-mono tabular-nums">
+                        <label className="inline-flex items-center gap-1 text-gray-400">
+                          <span>W</span>
+                          <input
+                            type="number"
+                            min={320}
+                            max={3840}
+                            step={2}
+                            value={exportWidth}
+                            onChange={(e) => {
+                              const v = parseInt(e.target.value, 10);
+                              if (!Number.isNaN(v)) {
+                                setExportWidth(Math.max(320, Math.min(3840, v)));
+                              }
+                            }}
+                            onBlur={() =>
+                              setExportWidth((w) => Math.max(320, Math.min(3840, w - (w % 2))))
+                            }
+                            aria-label="Export video width"
+                            className="w-14 px-1 py-0.5 rounded-sm bg-gray-950/80 border border-white/10 text-gray-200 text-right focus:outline-none focus:border-emerald-500/60"
+                          />
+                        </label>
+                        <span className="text-gray-500">×</span>
+                        <label className="inline-flex items-center gap-1 text-gray-400">
+                          <span>H</span>
+                          <input
+                            type="number"
+                            min={240}
+                            max={2160}
+                            step={2}
+                            value={exportHeight}
+                            onChange={(e) => {
+                              const v = parseInt(e.target.value, 10);
+                              if (!Number.isNaN(v)) {
+                                setExportHeight(Math.max(240, Math.min(2160, v)));
+                              }
+                            }}
+                            onBlur={() =>
+                              setExportHeight((h) => Math.max(240, Math.min(2160, h - (h % 2))))
+                            }
+                            aria-label="Export video height"
+                            className="w-14 px-1 py-0.5 rounded-sm bg-gray-950/80 border border-white/10 text-gray-200 text-right focus:outline-none focus:border-emerald-500/60"
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="space-y-1 text-xs">
+                  <div className="flex items-center justify-between gap-2 font-mono tabular-nums">
+                    <span className="text-red-400 font-semibold flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                      {webmExportState.status === 'finalizing'
+                        ? 'Saving WebM...'
+                        : `REC Demo ${exportWidth}×${exportHeight}`}
+                    </span>
+                    <span className="text-gray-300">
+                      {formatDurationClock(webmExportState.elapsedSec)} /{' '}
+                      {formatDurationClock(webmExportState.durationSec)}
+                    </span>
+                  </div>
+                  <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-400 transition-[width] duration-150"
+                      style={{
+                        width: `${
+                          webmExportState.durationSec > 0
+                            ? Math.min(100, (webmExportState.elapsedSec / webmExportState.durationSec) * 100)
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-end gap-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      disabled={webmExportState.status === 'finalizing'}
+                      onClick={() => screensaverExportRef.current?.stopAndSaveDemoWebmExport()}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-sm bg-emerald-500 hover:bg-emerald-400 text-gray-950 disabled:opacity-50 transition-colors"
+                      title="Stop recording early and download the WebM clip captured so far"
+                    >
+                      <Square className="w-3 h-3" />
+                      <span>Stop &amp; Save</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={webmExportState.status === 'finalizing'}
+                      onClick={() => screensaverExportRef.current?.cancelDemoWebmExport()}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-sm bg-white/[0.06] hover:bg-white/[0.12] text-gray-300 disabled:opacity-50 transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                      <span>Cancel</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {webmExportState.error && (
+                <div className="text-xs text-red-400">{webmExportState.error}</div>
+              )}
+              {!webmExportState.error && webmExportState.status === 'idle' && webmExportState.lastFileName && (
+                <div className="text-xs text-emerald-400 truncate font-mono">
+                  Saved {webmExportState.lastFileName}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Audio Level & Stem Audition Mode */}
         <div className="flex items-center justify-between gap-2">
