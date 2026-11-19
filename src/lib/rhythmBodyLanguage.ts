@@ -1,8 +1,8 @@
-import { ChartDifficulty, DrumEvent, LaneIndex, Section, SyncData } from '../types';
+import { ChartDifficulty, DrumEvent, LaneIndex, Section, SyncData, WindshieldPreset } from '../types';
 
+export type { WindshieldPreset };
 export type PinkPantherSymbol = 'L' | '&' | 'R';
 export type GroovePersona = 'Dancer' | 'Performer' | 'Drummer';
-export type WindshieldPreset = 'glsl-space' | 'wormhole' | 'music-rain' | 'milkdrop';
 
 export interface InputPercussionTrigger {
   wallTimeSec: number;

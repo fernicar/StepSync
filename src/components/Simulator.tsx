@@ -175,6 +175,7 @@ export function Simulator({
 
   useEffect(() => {
     if (simViewMode !== 'screensaver') {
+      screensaverExportRef.current?.cancelDemoWebmExport();
       setWebmExportState((prev) =>
         prev.status === 'idle'
           ? prev
@@ -1200,35 +1201,142 @@ export function Simulator({
             </div>
           </>
         ) : (
-          <ScreensaverVisualizer
-            sync={sync}
-            sections={sections}
-            isPlaying={isPlaying}
-            songDurationSec={audioMeta?.duration || engine.getBuffer()?.duration || 180}
-            drumEvents={effectiveScreensaverEvents}
-            tomBandIds={tomBandIds}
-            difficulty={difficulty}
-            pinkPantherPct={pinkPantherPct}
-            percussionPct={percussionPct}
-            snareCounterKick={snareCounterKick}
-            simpleBarOrientation={simpleBarOrientation}
-            simSoundMode={simSoundMode}
-            simSoundEnabled={simSoundEnabled}
-            pressedLanesRef={pressedLanesRef}
-            judgedNotesRef={judgedNotesRef}
-            lastJudgementHudRef={lastJudgementHudRef}
-            playerInputTriggersRef={playerInputTriggersRef}
-            playScore={playScore}
-            playScoreRef={scoreMutableRef}
-            onPlaybackTick={evaluatePlaybackJudgement}
-            fileName={audioMeta?.fileName}
-            onChangeSimSoundMode={onChangeSimSoundMode}
-            onBeforeDemoExportStart={resetPlayScore}
-            exportHandleRef={screensaverExportRef}
-            onWebmExportStateChange={setWebmExportState}
-            exportWidth={exportWidth}
-            exportHeight={exportHeight}
-          />
+          <>
+            <ScreensaverVisualizer
+              sync={sync}
+              sections={sections}
+              isPlaying={isPlaying}
+              songDurationSec={audioMeta?.duration || engine.getBuffer()?.duration || 180}
+              drumEvents={effectiveScreensaverEvents}
+              tomBandIds={tomBandIds}
+              difficulty={difficulty}
+              pinkPantherPct={pinkPantherPct}
+              percussionPct={percussionPct}
+              snareCounterKick={snareCounterKick}
+              simpleBarOrientation={simpleBarOrientation}
+              simSoundMode={simSoundMode}
+              simSoundEnabled={simSoundEnabled}
+              pressedLanesRef={pressedLanesRef}
+              judgedNotesRef={judgedNotesRef}
+              lastJudgementHudRef={lastJudgementHudRef}
+              playerInputTriggersRef={playerInputTriggersRef}
+              playScore={playScore}
+              playScoreRef={scoreMutableRef}
+              onPlaybackTick={evaluatePlaybackJudgement}
+              fileName={audioMeta?.fileName}
+              onChangeSimSoundMode={onChangeSimSoundMode}
+              onBeforeDemoExportStart={resetPlayScore}
+              exportHandleRef={screensaverExportRef}
+              onWebmExportStateChange={setWebmExportState}
+              exportWidth={exportWidth}
+              exportHeight={exportHeight}
+            />
+
+            {/* Screensaver-Only Body Language Tuning Pack (placed below the Screensaver viewport) */}
+            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-1.5 px-2.5 py-2 rounded-sm bg-white/[0.02] border border-white/[0.06]">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPinkPantherPct(0)}
+                  className="text-gray-300 hover:text-white shrink-0 whitespace-nowrap text-left"
+                  title="Click to jump to 0% (center wheel) to isolate percussion"
+                >
+                  Pink Panther
+                </button>
+                <input
+                  type="range"
+                  min={-200}
+                  max={200}
+                  step={5}
+                  value={pinkPantherPct}
+                  onChange={(e) => setPinkPantherPct(parseInt(e.target.value, 10))}
+                  aria-label="Pink Panther step scale percentage"
+                  className="w-full accent-emerald-500 h-1.5 cursor-pointer"
+                />
+                <button
+                  type="button"
+                  onClick={() => setPinkPantherPct(20)}
+                  className="font-mono tabular-nums text-emerald-300 hover:text-white w-12 text-right shrink-0"
+                  title="Click to reset to +20% default"
+                >
+                  {pinkPantherPct > 0 ? `+${pinkPantherPct}%` : `${pinkPantherPct}%`}
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setPercussionPct(0)}
+                  className="text-gray-300 hover:text-white shrink-0 whitespace-nowrap text-left"
+                  title="Click to jump to 0% (Pink Panther step only)"
+                >
+                  Percussion
+                </button>
+                <input
+                  type="range"
+                  min={-200}
+                  max={200}
+                  step={5}
+                  value={percussionPct}
+                  onChange={(e) => setPercussionPct(parseInt(e.target.value, 10))}
+                  aria-label="Percussion perturbation scale percentage"
+                  className="w-full accent-amber-400 h-1.5 cursor-pointer"
+                />
+                <button
+                  type="button"
+                  onClick={() => setPercussionPct(200)}
+                  className="font-mono tabular-nums text-amber-300 hover:text-white w-12 text-right shrink-0"
+                  title="Click to reset to +200% default"
+                >
+                  {percussionPct > 0 ? `+${percussionPct}%` : `${percussionPct}%`}
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span
+                  className="text-gray-300 whitespace-nowrap"
+                  title="OFF pulls pre-snare angle toward 0° center; ON makes Snare counter current Kick orientation"
+                >
+                  Snare Counters Kick
+                </span>
+                <button
+                  type="button"
+                  aria-pressed={snareCounterKick}
+                  onClick={() => setSnareCounterKick((v) => !v)}
+                  className={cn(
+                    'px-2 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0 font-medium',
+                    snareCounterKick
+                      ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                  )}
+                >
+                  {snareCounterKick ? 'ON · Opposite Kick' : 'OFF · Rebound 0°'}
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span
+                  className="text-gray-300 whitespace-nowrap"
+                  title="OFF follows L&R&L&L / R&L&R&R step orientation; ON holds Bar A Left and Bar B Right for percussion"
+                >
+                  Drum Orientation
+                </span>
+                <button
+                  type="button"
+                  aria-pressed={simpleBarOrientation}
+                  onClick={() => setSimpleBarOrientation((v) => !v)}
+                  className={cn(
+                    'px-2 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0 font-medium',
+                    simpleBarOrientation
+                      ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
+                  )}
+                >
+                  {simpleBarOrientation ? 'ON · Bar A: L · B: R' : 'OFF · Step L&R&L&L'}
+                </button>
+              </div>
+            </div>
+          </>
         )}
       </div>
 
@@ -1260,16 +1368,16 @@ export function Simulator({
             <div className="inline-flex items-center gap-0.5">
               {(
                 [
-                  { id: 'easy', label: 'Easy', persona: 'Dancer', activeClass: 'bg-sky-500/20 text-sky-300' },
-                  { id: 'normal', label: 'Normal', persona: 'Performer', activeClass: 'bg-amber-500/20 text-amber-300' },
-                  { id: 'hard', label: 'Hard', persona: 'Drummer', activeClass: 'bg-emerald-500/20 text-emerald-300' },
+                  { id: 'easy', label: 'Easy', activeClass: 'bg-sky-500/20 text-sky-300' },
+                  { id: 'normal', label: 'Normal', activeClass: 'bg-amber-500/20 text-amber-300' },
+                  { id: 'hard', label: 'Hard', activeClass: 'bg-emerald-500/20 text-emerald-300' },
                 ] as const
               ).map((d) => (
                 <button
                   key={d.id}
                   type="button"
                   onClick={() => onChangeDifficulty(d.id)}
-                  title={`${d.label} (${d.persona})`}
+                  title={`${d.label} Difficulty`}
                   className={cn(
                     'px-2 py-0.5 text-xs font-medium rounded-sm transition-colors whitespace-nowrap shrink-0',
                     difficulty === d.id
@@ -1277,7 +1385,7 @@ export function Simulator({
                       : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
                   )}
                 >
-                  {simViewMode === 'screensaver' ? `${d.label} · ${d.persona}` : d.label}
+                  {d.label}
                 </button>
               ))}
             </div>
@@ -1309,193 +1417,107 @@ export function Simulator({
           </div>
         </div>
 
-        {/* Body Language Tuning Sliders & Snare Rule Toggle (outside Screensaver viewport) */}
+        {/* Configurable Screensaver Video Export (.webm, default 1280×720, plus 1920×1080 & 720×1280 vertical) */}
         {simViewMode === 'screensaver' && (
-          <div className="space-y-1.5 pt-1">
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <button
-                type="button"
-                onClick={() => setPinkPantherPct(0)}
-                className="text-gray-300 hover:text-white shrink-0 whitespace-nowrap text-left"
-                title="Click to jump to 0% (center wheel) to isolate percussion"
-              >
-                Pink Panther
-              </button>
-              <input
-                type="range"
-                min={-200}
-                max={200}
-                step={5}
-                value={pinkPantherPct}
-                onChange={(e) => setPinkPantherPct(parseInt(e.target.value, 10))}
-                aria-label="Pink Panther step scale percentage"
-                className="w-full accent-emerald-500 h-1.5 cursor-pointer"
-              />
-              <button
-                type="button"
-                onClick={() => setPinkPantherPct(20)}
-                className="font-mono tabular-nums text-emerald-300 hover:text-white w-12 text-right shrink-0"
-                title="Click to reset to +20% default"
-              >
-                {pinkPantherPct > 0 ? `+${pinkPantherPct}%` : `${pinkPantherPct}%`}
-              </button>
-            </div>
+          <div className="pt-1.5 border-t border-white/[0.06] space-y-1.5">
+            {webmExportState.status === 'idle' ? (
+              <>
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="text-gray-400 whitespace-nowrap">Screensaver Video</span>
+                  <div className="inline-flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      aria-expanded={exportSettingsOpen}
+                      onClick={() => setExportSettingsOpen((v) => !v)}
+                      className={cn(
+                        'inline-flex items-center justify-center p-1 rounded-sm transition-colors',
+                        exportSettingsOpen
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : 'text-gray-400 hover:text-white hover:bg-white/[0.08]'
+                      )}
+                      title="Configure WebM export width and height (1280×720, 1920×1080, 720×1280 vertical)"
+                      aria-label="Export resolution settings"
+                    >
+                      <Settings className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        screensaverExportRef.current?.startDemoWebmExport({
+                          width: exportWidth,
+                          height: exportHeight,
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-sm bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 transition-colors whitespace-nowrap shrink-0"
+                      title={`Arm ${simSoundMode.toUpperCase()} playback capture at ${exportWidth}×${exportHeight} .webm (press Space to begin)`}
+                    >
+                      <Video className="w-3.5 h-3.5" />
+                      <span>
+                        Export WebM · {exportWidth}×{exportHeight}
+                      </span>
+                    </button>
+                  </div>
+                </div>
 
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <button
-                type="button"
-                onClick={() => setPercussionPct(0)}
-                className="text-gray-300 hover:text-white shrink-0 whitespace-nowrap text-left"
-                title="Click to jump to 0% (Pink Panther step only)"
-              >
-                Percussion
-              </button>
-              <input
-                type="range"
-                min={-200}
-                max={200}
-                step={5}
-                value={percussionPct}
-                onChange={(e) => setPercussionPct(parseInt(e.target.value, 10))}
-                aria-label="Percussion perturbation scale percentage"
-                className="w-full accent-amber-400 h-1.5 cursor-pointer"
-              />
-              <button
-                type="button"
-                onClick={() => setPercussionPct(200)}
-                className="font-mono tabular-nums text-amber-300 hover:text-white w-12 text-right shrink-0"
-                title="Click to reset to +200% default"
-              >
-                {percussionPct > 0 ? `+${percussionPct}%` : `${percussionPct}%`}
-              </button>
-            </div>
-
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span
-                className="text-gray-300 whitespace-nowrap"
-                title="OFF pulls pre-snare angle toward 0° center; ON makes Snare counter current Kick orientation"
-              >
-                Snare Counters Kick
-              </span>
-              <button
-                type="button"
-                aria-pressed={snareCounterKick}
-                onClick={() => setSnareCounterKick((v) => !v)}
-                className={cn(
-                  'px-2 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0 font-medium',
-                  snareCounterKick
-                    ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
-                    : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
-                )}
-              >
-                {snareCounterKick ? 'ON · Opposite Kick' : 'OFF · Rebound 0°'}
-              </button>
-            </div>
-
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span
-                className="text-gray-300 whitespace-nowrap"
-                title="OFF follows L&R&L&L / R&L&R&R step orientation; ON holds Bar A Left and Bar B Right for percussion"
-              >
-                Drum Orientation
-              </span>
-              <button
-                type="button"
-                aria-pressed={simpleBarOrientation}
-                onClick={() => setSimpleBarOrientation((v) => !v)}
-                className={cn(
-                  'px-2 py-0.5 text-xs rounded-sm transition-colors whitespace-nowrap shrink-0 font-medium',
-                  simpleBarOrientation
-                    ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
-                    : 'text-gray-400 hover:text-gray-200 hover:bg-white/[0.06]'
-                )}
-              >
-                {simpleBarOrientation ? 'ON · Bar A: L · B: R' : 'OFF · Step L&R&L&L'}
-              </button>
-            </div>
-
-            {/* Configurable Demo Video Export (.webm, default 1280×720) */}
-            <div className="pt-1.5 border-t border-white/[0.06] space-y-1.5">
-              {webmExportState.status === 'idle' ? (
-                <>
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="text-gray-400 whitespace-nowrap">Demo Video</span>
-                    <div className="inline-flex items-center gap-1 shrink-0">
+                {exportSettingsOpen && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-white/[0.03] border border-white/[0.06] text-xs">
+                    <div className="inline-flex flex-wrap items-center gap-1">
                       <button
                         type="button"
-                        aria-expanded={exportSettingsOpen}
-                        onClick={() => setExportSettingsOpen((v) => !v)}
+                        onClick={() => {
+                          setExportWidth(1280);
+                          setExportHeight(720);
+                        }}
+                        title="Landscape 16:9 HD (720p)"
                         className={cn(
-                          'inline-flex items-center justify-center p-1 rounded-sm transition-colors',
-                          exportSettingsOpen
-                            ? 'bg-emerald-500/20 text-emerald-300'
-                            : 'text-gray-400 hover:text-white hover:bg-white/[0.08]'
+                          'px-1.5 py-0.5 rounded-sm font-mono tabular-nums transition-colors',
+                          exportWidth === 1280 && exportHeight === 720
+                            ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
+                            : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
                         )}
-                        title="Configure WebM export width and height (default 1280×720)"
-                        aria-label="Export resolution settings"
                       >
-                        <Settings className="w-3.5 h-3.5" />
+                        1280×720
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
-                          screensaverExportRef.current?.startDemoWebmExport({
-                            width: exportWidth,
-                            height: exportHeight,
-                          })
-                        }
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-sm bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 transition-colors whitespace-nowrap shrink-0"
-                        title={`Render Demo playback (with active preset & audio) to a ${exportWidth}×${exportHeight} .webm video`}
+                        onClick={() => {
+                          setExportWidth(1920);
+                          setExportHeight(1080);
+                        }}
+                        title="Landscape 16:9 Full HD (1080p)"
+                        className={cn(
+                          'px-1.5 py-0.5 rounded-sm font-mono tabular-nums transition-colors',
+                          exportWidth === 1920 && exportHeight === 1080
+                            ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
+                            : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+                        )}
                       >
-                        <Video className="w-3.5 h-3.5" />
-                        <span>
-                          Export WebM · {exportWidth}×{exportHeight}
-                        </span>
+                        1920×1080
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExportWidth(720);
+                          setExportHeight(1280);
+                        }}
+                        title="Vertical 9:16 Social (Shorts / Reels / TikTok)"
+                        className={cn(
+                          'px-1.5 py-0.5 rounded-sm font-mono tabular-nums transition-colors',
+                          exportWidth === 720 && exportHeight === 1280
+                            ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
+                            : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
+                        )}
+                      >
+                        720×1280
                       </button>
                     </div>
-                  </div>
-
-                  {exportSettingsOpen && (
-                    <div className="flex flex-wrap items-center justify-between gap-2 px-2 py-1.5 rounded-sm bg-white/[0.03] border border-white/[0.06] text-xs">
-                      <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setExportWidth(1280);
-                            setExportHeight(720);
-                          }}
-                          className={cn(
-                            'px-1.5 py-0.5 rounded-sm font-mono tabular-nums transition-colors',
-                            exportWidth === 1280 && exportHeight === 720
-                              ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
-                              : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
-                          )}
-                        >
-                          1280×720
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setExportWidth(1920);
-                            setExportHeight(1080);
-                          }}
-                          className={cn(
-                            'px-1.5 py-0.5 rounded-sm font-mono tabular-nums transition-colors',
-                            exportWidth === 1920 && exportHeight === 1080
-                              ? 'bg-emerald-500/25 text-emerald-300 font-semibold'
-                              : 'text-gray-400 hover:text-white hover:bg-white/[0.06]'
-                          )}
-                        >
-                          1920×1080
-                        </button>
-                      </div>
-                      <div className="inline-flex items-center gap-1 font-mono tabular-nums">
-                        <label className="inline-flex items-center gap-1 text-gray-400">
-                          <span>W</span>
-                          <input
-                            type="number"
-                            min={320}
-                            max={3840}
+                    <div className="inline-flex items-center gap-1 font-mono tabular-nums">
+                      <label className="inline-flex items-center gap-1 text-gray-400">
+                        <span>W</span>
+                        <input
+                          type="number"
+                          min={320}
+                          max={3840}
                             step={2}
                             value={exportWidth}
                             onChange={(e) => {
@@ -1537,6 +1559,27 @@ export function Simulator({
                     </div>
                   )}
                 </>
+              ) : webmExportState.status === 'armed' ? (
+                <div className="space-y-1 text-xs">
+                  <div className="flex items-center justify-between gap-2 font-mono tabular-nums">
+                    <span className="text-emerald-300 font-semibold">
+                      Press space to begin
+                    </span>
+                    <span className="text-gray-400">
+                      {simSoundMode.toUpperCase()} · {exportWidth}×{exportHeight}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-end gap-1.5 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => screensaverExportRef.current?.cancelDemoWebmExport()}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-sm bg-white/[0.06] hover:bg-white/[0.12] text-gray-300 transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                      <span>Cancel</span>
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <div className="space-y-1 text-xs">
                   <div className="flex items-center justify-between gap-2 font-mono tabular-nums">
@@ -1544,7 +1587,7 @@ export function Simulator({
                       <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
                       {webmExportState.status === 'finalizing'
                         ? 'Saving WebM...'
-                        : `REC Demo ${exportWidth}×${exportHeight}`}
+                        : `REC ${simSoundMode.toUpperCase()} ${exportWidth}×${exportHeight}`}
                     </span>
                     <span className="text-gray-300">
                       {formatDurationClock(webmExportState.elapsedSec)} /{' '}
@@ -1595,7 +1638,6 @@ export function Simulator({
                   Saved {webmExportState.lastFileName}
                 </div>
               )}
-            </div>
           </div>
         )}
 

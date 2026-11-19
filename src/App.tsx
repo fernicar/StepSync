@@ -63,6 +63,7 @@ import {
   ManualNoteEdits,
   SimSoundMode,
   StepSyncProject,
+  WindshieldPreset,
 } from './types';
 import { cn } from './lib/utils';
 import { Waveform } from './components/Waveform';
@@ -92,19 +93,19 @@ export default function App() {
   });
 
   const [sections, setSections] = useState<Section[]>([
-    { id: '1', beat: 0, label: 'Intro', density: 'Medium' },
-    { id: '2', beat: 16, label: 'Chorus', density: 'Dense' },
-    { id: '3', beat: 48, label: 'Verse 1', density: 'Medium' },
-    { id: '4', beat: 80, label: 'instrumental', density: 'Medium' },
-    { id: '5', beat: 104, label: 'Chorus', density: 'Dense' },
-    { id: '6', beat: 136, label: 'instrumental', density: 'Dense' },
-    { id: '7', beat: 144, label: 'Verse 2', density: 'Sparse' },
-    { id: '8', beat: 176, label: 'instrumental', density: 'Dense' },
-    { id: '9', beat: 200, label: 'Chorus', density: 'Medium' },
-    { id: '10', beat: 232, label: 'Verse 3', density: 'Sparse' },
-    { id: '11', beat: 296, label: 'instrumental', density: 'Dense' },
-    { id: '12', beat: 304, label: 'Chorus', density: 'Medium' },
-    { id: '13', beat: 336, label: 'instrumental', density: 'Sparse' },
+    { id: '1', beat: 0, label: 'Intro', density: 'Medium', preset: 'milkdrop' },
+    { id: '2', beat: 16, label: 'Chorus', density: 'Dense', preset: 'glsl-space' },
+    { id: '3', beat: 48, label: 'Verse 1', density: 'Medium', preset: 'wormhole' },
+    { id: '4', beat: 80, label: 'instrumental', density: 'Medium', preset: 'music-rain' },
+    { id: '5', beat: 104, label: 'Chorus', density: 'Dense', preset: 'glsl-space' },
+    { id: '6', beat: 136, label: 'instrumental', density: 'Dense', preset: 'music-rain' },
+    { id: '7', beat: 144, label: 'Verse 2', density: 'Sparse', preset: 'wormhole' },
+    { id: '8', beat: 176, label: 'instrumental', density: 'Dense', preset: 'music-rain' },
+    { id: '9', beat: 200, label: 'Chorus', density: 'Medium', preset: 'glsl-space' },
+    { id: '10', beat: 232, label: 'Verse 3', density: 'Sparse', preset: 'wormhole' },
+    { id: '11', beat: 296, label: 'instrumental', density: 'Dense', preset: 'music-rain' },
+    { id: '12', beat: 304, label: 'Chorus', density: 'Medium', preset: 'glsl-space' },
+    { id: '13', beat: 336, label: 'instrumental', density: 'Sparse', preset: 'milkdrop' },
   ]);
 
   const [isPlaying, setIsPlaying] = useState(false);
@@ -2339,11 +2340,12 @@ Follow the syntax format strictly:
                   {/* Flat Spreadsheet Section Rows (zero lines, black writing inputs) */}
                   <div className="space-y-1">
                     {sections.length > 0 && (
-                      <div className="hidden md:grid md:grid-cols-[2.25rem_5.5rem_1fr_6.5rem_4rem_4rem_4rem_2rem] gap-1.5 items-center py-0.5 text-xs font-medium uppercase tracking-wider text-gray-500">
+                      <div className="hidden md:grid md:grid-cols-[2.25rem_5rem_1fr_5.5rem_7.25rem_3.75rem_3.75rem_3.75rem_2rem] gap-1.5 items-center py-0.5 text-xs font-medium uppercase tracking-wider text-gray-500">
                         <span className="text-right">#</span>
                         <span className="px-1">Beat</span>
                         <span className="px-1">Type</span>
                         <span className="px-1">Density</span>
+                        <span className="px-1">Preset</span>
                         <span className="text-right text-sky-400">
                           E{sectionMetricMode === 'avg' ? '/b' : ''}
                         </span>
@@ -2369,7 +2371,7 @@ Follow the syntax format strictly:
                       return (
                         <div
                           key={section.id}
-                          className="grid grid-cols-1 md:grid-cols-[2.25rem_5.5rem_1fr_6.5rem_4rem_4rem_4rem_2rem] gap-1.5 items-center py-0.5 hover:bg-white/[0.02] rounded-sm"
+                          className="grid grid-cols-1 md:grid-cols-[2.25rem_5rem_1fr_5.5rem_7.25rem_3.75rem_3.75rem_3.75rem_2rem] gap-1.5 items-center py-0.5 hover:bg-white/[0.02] rounded-sm"
                         >
                           <div className="hidden md:block text-xs font-mono tabular-nums text-gray-500 text-right">
                             {idx + 1}
@@ -2414,6 +2416,38 @@ Follow the syntax format strictly:
                             </select>
                           </div>
 
+                          <div className="flex items-center gap-1.5">
+                            <span className="md:hidden text-xs text-gray-500 w-14">Preset</span>
+                            <select
+                              value={section.preset ?? ''}
+                              onChange={(e) => {
+                                const val = e.target.value as WindshieldPreset | '';
+                                updateSection(section.id, { preset: val || undefined });
+                              }}
+                              className={cn(
+                                'bg-transparent hover:bg-white/[0.05] focus:bg-white/[0.08] rounded-sm px-1 py-0.5 w-full text-xs focus:outline-none cursor-pointer',
+                                section.preset ? 'text-emerald-300 font-medium' : 'text-gray-400'
+                              )}
+                              title="Auto-switch Screensaver preset (1 GLSL, 2 Wormhole, 3 Rain, 4 MilkDrop) when entering this section"
+                            >
+                              <option value="" className="bg-gray-950 text-gray-400">
+                                — Keep
+                              </option>
+                              <option value="glsl-space" className="bg-gray-950 text-gray-200">
+                                1 · GLSL
+                              </option>
+                              <option value="wormhole" className="bg-gray-950 text-gray-200">
+                                2 · Wormhole
+                              </option>
+                              <option value="music-rain" className="bg-gray-950 text-gray-200">
+                                3 · Rain
+                              </option>
+                              <option value="milkdrop" className="bg-gray-950 text-gray-200">
+                                4 · MilkDrop
+                              </option>
+                            </select>
+                          </div>
+
                           <div
                             className="flex items-center justify-between md:justify-end gap-1 font-mono tabular-nums text-xs"
                             title={`${stats.easy.count} inputs across ${stats.beats.toFixed(0)} beats`}
@@ -2452,8 +2486,8 @@ Follow the syntax format strictly:
                     })}
 
                     {sections.length > 0 && (
-                      <div className="grid grid-cols-1 md:grid-cols-[2.25rem_5.5rem_1fr_6.5rem_4rem_4rem_4rem_2rem] gap-1.5 items-center pt-1 text-xs font-mono tabular-nums">
-                        <div className="md:col-span-4 text-gray-400 font-sans font-medium">
+                      <div className="grid grid-cols-1 md:grid-cols-[2.25rem_5rem_1fr_5.5rem_7.25rem_3.75rem_3.75rem_3.75rem_2rem] gap-1.5 items-center pt-1 text-xs font-mono tabular-nums">
+                        <div className="md:col-span-5 text-gray-400 font-sans font-medium">
                           {sectionMetricMode === 'avg' ? 'Overall Avg / Beat' : 'Total Inputs'}
                         </div>
                         <div className="flex items-center justify-between md:justify-end text-sky-300 font-semibold">

@@ -15,7 +15,7 @@ import {
 } from '../lib/rhythmBodyLanguage';
 
 export interface ScreensaverWebmExportState {
-  status: 'idle' | 'recording' | 'finalizing';
+  status: 'idle' | 'armed' | 'recording' | 'finalizing';
   elapsedSec: number;
   durationSec: number;
   error: string | null;
@@ -86,6 +86,34 @@ function normalizeExportDimension(
   return Math.max(min, even);
 }
 
+interface DashScreenRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function getCockpitScreenLayout(w: number, h: number): {
+  isPortrait: boolean;
+  left: DashScreenRect;
+  right: DashScreenRect;
+} {
+  const isPortrait = h > w * 1.05;
+  if (isPortrait) {
+    // Vertical 9:16 cockpit: twin widescreen console bays side-by-side below the U-yoke
+    return {
+      isPortrait: true,
+      left: { x: w * 0.032, y: h * 0.858, w: w * 0.454, h: h * 0.118 },
+      right: { x: w * 0.514, y: h * 0.858, w: w * 0.454, h: h * 0.118 },
+    };
+  }
+  return {
+    isPortrait: false,
+    left: { x: w * 0.032, y: h * 0.725, w: w * 0.28, h: h * 0.237 },
+    right: { x: w * 0.688, y: h * 0.725, w: w * 0.28, h: h * 0.237 },
+  };
+}
+
 const PRESETS: readonly { id: WindshieldPreset; keyNum: string; label: string }[] = [
   { id: 'glsl-space', keyNum: '1', label: 'GLSL Space' },
   { id: 'wormhole', keyNum: '2', label: 'Wormhole' },
@@ -95,11 +123,11 @@ const PRESETS: readonly { id: WindshieldPreset; keyNum: string; label: string }[
 
 const PERSONA_META: Record<
   ChartDifficulty,
-  { name: string; textClass: string; accentHex: string }
+  { name: string; diffLabel: string; textClass: string; accentHex: string }
 > = {
-  easy: { name: 'Dancer', textClass: 'text-sky-300', accentHex: '#38bdf8' },
-  normal: { name: 'Performer', textClass: 'text-amber-300', accentHex: '#f59e0b' },
-  hard: { name: 'Drummer', textClass: 'text-emerald-300', accentHex: '#34d399' },
+  easy: { name: 'Dancer', diffLabel: 'Easy', textClass: 'text-sky-300', accentHex: '#38bdf8' },
+  normal: { name: 'Performer', diffLabel: 'Normal', textClass: 'text-amber-300', accentHex: '#f59e0b' },
+  hard: { name: 'Drummer', diffLabel: 'Hard', textClass: 'text-emerald-300', accentHex: '#34d399' },
 };
 
 const VERTEX_SHADER_SRC = `#version 300 es
@@ -504,6 +532,8 @@ export function ScreensaverVisualizer({
   const [activeExportSize, setActiveExportSize] = useState<{ width: number; height: number } | null>(
     null
   );
+  const [isArmedToRecord, setIsArmedToRecord] = useState(false);
+  const [isPortraitView, setIsPortraitView] = useState(() => exportHeight > exportWidth * 1.05);
 
   const presetRef = useRef<WindshieldPreset>(preset);
   presetRef.current = preset;
@@ -511,9 +541,19 @@ export function ScreensaverVisualizer({
   showInputHighwayRef.current = showInputHighway;
   const glFallbackRef = useRef(glFallback);
   glFallbackRef.current = glFallback;
+  const isPortraitViewRef = useRef(isPortraitView);
+  isPortraitViewRef.current = isPortraitView;
+  const lastAutoSectionKeyRef = useRef<string | null>(null);
+  const prevAutoBeatRef = useRef<number | null>(null);
+
+  const sortedSections = useMemo(
+    () => [...sections].sort((a, b) => a.beat - b.beat),
+    [sections]
+  );
 
   const exportSessionRef = useRef<{
     active: boolean;
+    armed: boolean;
     finishing: boolean;
     cancelled: boolean;
     recorder: MediaRecorder | null;
@@ -521,7 +561,6 @@ export function ScreensaverVisualizer({
     chunks: Blob[];
     mimeType: string;
     prevLoop: boolean;
-    prevMode: SimSoundMode;
     durationSec: number;
     width: number;
     height: number;
@@ -530,6 +569,7 @@ export function ScreensaverVisualizer({
     lastProgressUiMs: number;
     finishTimerId: number | null;
     clearTerrainOnStart?: boolean;
+    beginCaptureFn?: () => Promise<void>;
   } | null>(null);
 
   const tomBandSet = useMemo(() => new Set(['tom', ...tomBandIds]), [tomBandIds]);
@@ -537,6 +577,7 @@ export function ScreensaverVisualizer({
   const propsRef = useRef({
     sync,
     sections,
+    sortedSections,
     isPlaying,
     songDurationSec,
     drumEvents,
@@ -564,6 +605,7 @@ export function ScreensaverVisualizer({
   propsRef.current = {
     sync,
     sections,
+    sortedSections,
     isPlaying,
     songDurationSec,
     drumEvents,
@@ -656,6 +698,26 @@ export function ScreensaverVisualizer({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Capture Spacebar while recording is armed so the window has focus before capture starts
+  useEffect(() => {
+    const onKeyDownCapture = (e: KeyboardEvent) => {
+      const sess = exportSessionRef.current;
+      if (!sess || !sess.active || !sess.armed) return;
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        if (!e.repeat) {
+          void sess.beginCaptureFn?.();
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDownCapture, true);
+    return () => window.removeEventListener('keydown', onKeyDownCapture, true);
   }, []);
 
   // Main unified animation engine (WebGL shaders + Music Rain particles + Futuristic Cockpit Vector Overlay)
@@ -765,7 +827,17 @@ export function ScreensaverVisualizer({
       const targetH =
         exporting && exportSess ? exportSess.height : Math.max(240, Math.round(rect.height * dpr));
 
-      const dashScale = Math.max(0.85, Math.min(rect.width / 700, rect.height / 438));
+      const screenLayout = getCockpitScreenLayout(rect.width, rect.height);
+      const nextPortrait = targetH > targetW * 1.05;
+      if (isPortraitViewRef.current !== nextPortrait) {
+        isPortraitViewRef.current = nextPortrait;
+        setIsPortraitView(nextPortrait);
+      }
+
+      const dashScale = Math.max(
+        nextPortrait ? 0.62 : 0.85,
+        Math.min(screenLayout.left.w / 196, screenLayout.left.h / 104)
+      );
       container.style.setProperty('--dash-fs', `${(dashScale * 16).toFixed(2)}px`);
 
       if (bgCanvas.width !== targetW || bgCanvas.height !== targetH) {
@@ -790,12 +862,13 @@ export function ScreensaverVisualizer({
       const total = terrainHistory.length;
       if (total === 0) return;
 
-      // Exact sky/valley horizon matching GLSL_SPACE_FRAG horizonY = 0.05, ending at the dashboard sill (~0.69h)
+      const isPortrait = h > w * 1.05;
+      // Exact sky/valley horizon matching GLSL_SPACE_FRAG horizonY = 0.05, ending at the dashboard sill
       const horizonY = h * 0.5 - 0.05 * Math.min(w, h);
-      const baseY = h * 0.69;
+      const baseY = isPortrait ? h * 0.61 : h * 0.69;
       const sweepH = Math.max(30, baseY - horizonY);
       const totalDots = SPEC_HALF_COLS * 2;
-      const dotScale = Math.max(0.75, Math.min(2.2, w / 960));
+      const dotScale = Math.max(0.75, Math.min(2.2, Math.hypot(w, h) / 1150));
 
       // Iterate newest (horizon, back) -> oldest (foreground, front) for clean painter occlusion
       for (let r = total - 1; r >= 0; r--) {
@@ -805,7 +878,7 @@ export function ScreensaverVisualizer({
         const rowBaseY = baseY - invAge * sweepH;
         const rowWidth = w * (1.5 - invAge * 0.55); // 95% at horizon -> 150% at near dashboard sill
         const xInset = (w - rowWidth) * 0.5;
-        const rowGain = (0.2 + invAge * 1.5) * (h * 0.16);
+        const rowGain = (0.2 + invAge * 1.5) * (Math.min(w, h) * 0.16);
         const intensityBoost = 0.65 + ageRatio * 0.35;
 
         // Dark occlusion silhouette beneath advancing dot-matrix ridge so front rows cover distant hills
@@ -853,7 +926,7 @@ export function ScreensaverVisualizer({
       const cy = h * 0.5 - 0.1 * Math.min(w, h);
       const minR = Math.min(w, h) * 0.055;
       const maxR = Math.hypot(w * 0.58, h * 0.65);
-      const dotScale = Math.max(0.75, Math.min(2.2, w / 960));
+      const dotScale = Math.max(0.75, Math.min(2.2, Math.hypot(w, h) / 1150));
 
       const totalDots = SPEC_HALF_COLS * 2; // 96 radial points around 360° in 4 mirrored quadrants
       const quadDots = totalDots / 4; // 24 dots per quadrant
@@ -963,7 +1036,7 @@ export function ScreensaverVisualizer({
       const cx = w * 0.5;
       const cy = h * 0.5 - 0.06 * Math.min(w, h);
       const minDim = Math.min(w, h);
-      const dotScale = Math.max(0.75, Math.min(2.2, w / 960));
+      const dotScale = Math.max(0.75, Math.min(2.2, Math.hypot(w, h) / 1150));
 
       const { kick, snare, tom, hat, hatParity } = target.impulses;
       const folds = Math.floor(target.meter.phraseIndex) % 2 === 0 ? 6 : 8;
@@ -1113,16 +1186,20 @@ export function ScreensaverVisualizer({
       ctx.fillStyle = `rgba(3, 5, 11, ${0.28 + snare * 0.14})`;
       ctx.fillRect(0, 0, w, h);
 
+      const isPortrait = h > w * 1.05;
+      const cx = w * 0.5;
+      const cy = isPortrait ? h * 0.33 : h * 0.42;
+
       // Deep subtle radial horizon ambience
-      const bgGlow = ctx.createRadialGradient(w * 0.5, h * 0.42, 0, w * 0.5, h * 0.42, w * 0.65);
+      const bgGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(w, h) * 0.65);
       bgGlow.addColorStop(0, `rgba(14, 116, 144, ${0.12 + kick * 0.14 + snare * 0.12})`);
       bgGlow.addColorStop(0.55, `rgba(15, 23, 42, ${0.06 + tom * 0.08})`);
       bgGlow.addColorStop(1, 'rgba(2, 4, 8, 0)');
       ctx.fillStyle = bgGlow;
       ctx.fillRect(0, 0, w, h);
 
-      const cx = w * 0.5;
-      const cy = h * 0.42;
+      const projX = isPortrait ? Math.min(w, h) * 0.54 : w * 0.45;
+      const projY = isPortrait ? Math.min(w, h) * 0.54 : h * 0.45;
       const baseSpeed = (0.38 + kick * 1.15 + snare * 0.55 + tom * 0.85) * personaMult;
       const turb = (0.04 + tom * 0.28 + hat * 0.12) * personaMult;
 
@@ -1156,10 +1233,10 @@ export function ScreensaverVisualizer({
 
         const scaleNow = 0.52 / pt.z;
         const scalePrev = 0.52 / pt.prevZ;
-        const sx = cx + pt.x * scaleNow * w * 0.45;
-        const sy = cy + pt.y * scaleNow * h * 0.45;
-        const px = cx + pt.x * scalePrev * w * 0.45;
-        const py = cy + pt.y * scalePrev * h * 0.45;
+        const sx = cx + pt.x * scaleNow * projX;
+        const sy = cy + pt.y * scaleNow * projY;
+        const px = cx + pt.x * scalePrev * projX;
+        const py = cy + pt.y * scalePrev * projY;
 
         if (sx < -60 || sx > w + 60 || sy < -60 || sy > h + 60) continue;
 
@@ -1179,7 +1256,7 @@ export function ScreensaverVisualizer({
         }
 
         ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = Math.max(1.0, (1.0 - pt.z) * 2.8 * pt.size * (w / 900));
+        ctx.lineWidth = Math.max(1.0, (1.0 - pt.z) * 2.8 * pt.size * (Math.max(w, h) / 900));
         ctx.beginPath();
         ctx.moveTo(px, py);
         ctx.lineTo(sx, sy);
@@ -1247,12 +1324,13 @@ export function ScreensaverVisualizer({
       curJudgedRef: React.RefObject<Map<number, JudgementTier | 'skipped'>> | undefined,
       curJudgementHudRef: React.RefObject<JudgementHudSnapshot | null> | undefined
     ) => {
+      const isPortrait = h > w * 1.05;
       const hwLeft = cx - wheelR;
       const hwWidth = wheelR * 2;
       const laneW = hwWidth / 4;
-      const hitY = h * 0.592;
-      const dashStopY = h * 0.632;
-      const scrollSpeed = h * 0.64; // rain down cleanly from windshield top to dashboard hit line
+      const hitY = isPortrait ? h * 0.53 : h * 0.592;
+      const dashStopY = isPortrait ? h * 0.565 : h * 0.632;
+      const scrollSpeed = isPortrait ? h * 0.44 : h * 0.64; // rain down cleanly from windshield top to dashboard hit line
       const boxHalf = Math.min(laneW * 0.34, h * 0.028);
       const arrowR = Math.min(laneW * 0.32, h * 0.026);
       const arrowDirs: readonly ('left' | 'down' | 'up' | 'right')[] = ['left', 'down', 'up', 'right'];
@@ -1402,10 +1480,14 @@ export function ScreensaverVisualizer({
     ) => {
       ctx.clearRect(0, 0, w, h);
 
-      const scale = Math.min(w / 960, h / 600);
+      const screenLayout = getCockpitScreenLayout(w, h);
+      const isPortrait = screenLayout.isPortrait;
+      const scale = isPortrait ? Math.min(w / 620, h / 1100) : Math.min(w / 960, h / 600);
       const cx = w * 0.5;
-      const wheelCy = h * 0.82;
-      const wheelR = Math.min(w * 0.165, h * 0.275);
+      const wheelCy = isPortrait ? h * 0.695 : h * 0.82;
+      const wheelR = isPortrait
+        ? Math.min(w * 0.255, h * 0.145)
+        : Math.min(w * 0.165, h * 0.275);
 
       const kickG = motion.peakKickGlow;
       const snareG = motion.peakSnareGlow;
@@ -1415,16 +1497,22 @@ export function ScreensaverVisualizer({
 
       // Key interior frame coordinates connecting ceiling -> cockpit-angled [\\  /] pillars -> solid dashboard
       // Narrower dash shoulders flare outward to ceiling, forming a fighter/spaceship canopy & open side windows
-      const roofYEdge = h * 0.05;
-      const roofYMid = h * 0.04;
+      const roofYEdge = isPortrait ? h * 0.036 : h * 0.05;
+      const roofYMid = isPortrait ? h * 0.028 : h * 0.04;
       const outerEdgeW = Math.max(5, w * 0.008);
-      const pillarInnerTopX = w * 0.088;
-      const pillarInnerBotX = w * 0.148;
+      const pillarInnerTopX = isPortrait ? w * 0.078 : w * 0.088;
+      const pillarInnerBotX = isPortrait ? w * 0.125 : w * 0.148;
       const pillarW = Math.max(14, w * 0.026);
       const pillarOuterTopX = pillarInnerTopX - pillarW;
       const pillarOuterBotX = pillarInnerBotX - pillarW;
-      const dashCornerY = h * 0.664;
-      const dashShoulderY = h * 0.674;
+      const dashCornerY = isPortrait ? h * 0.592 : h * 0.664;
+      const dashShoulderY = isPortrait ? h * 0.602 : h * 0.674;
+      const dashCrestY = isPortrait ? h * 0.565 : h * 0.625;
+      const dashBinnacleMidY = isPortrait ? h * 0.596 : h * 0.668;
+      const dashPadLowerY = isPortrait ? h * 0.642 : h * 0.716;
+      const dashPadCrestY = isPortrait ? h * 0.594 : h * 0.656;
+      const dashPadSideY = isPortrait ? h * 0.634 : h * 0.705;
+      const dashWingY = isPortrait ? h * 0.636 : h * 0.706;
 
       // 0. Raining Input Arrow Highway projected above wheel width onto hit line near dashboard
       if (inputOverlayVisible) {
@@ -1448,34 +1536,36 @@ export function ScreensaverVisualizer({
       }
 
       // 1. Solid Opaque Dashboard Body (spans full door-to-door width below windshield + side-window sills)
-      const dashGrad = ctx.createLinearGradient(0, h * 0.62, 0, h);
+      const dashGrad = ctx.createLinearGradient(0, dashCrestY, 0, h);
       dashGrad.addColorStop(0, '#10131b');
       dashGrad.addColorStop(0.18, '#090b10');
       dashGrad.addColorStop(0.55, '#05060a');
       dashGrad.addColorStop(1, '#030407');
 
       const traceDashTopContour = (offsetY = 0) => {
+        const binnacleShoulderL = isPortrait ? w * 0.24 : w * 0.325;
+        const binnacleShoulderR = w - binnacleShoulderL;
         ctx.moveTo(0, dashCornerY + offsetY);
         ctx.lineTo(pillarInnerBotX, dashShoulderY + offsetY);
-        ctx.quadraticCurveTo(w * 0.22, h * 0.67 + offsetY, w * 0.325, h * 0.668 + offsetY);
+        ctx.quadraticCurveTo(w * 0.19, dashBinnacleMidY + offsetY, binnacleShoulderL, dashBinnacleMidY + offsetY);
         // Sculpted driver instrument binnacle hood rising over steering wheel
         ctx.bezierCurveTo(
-          w * 0.38,
-          h * 0.665 + offsetY,
-          w * 0.41,
-          h * 0.625 + offsetY,
+          isPortrait ? w * 0.32 : w * 0.38,
+          dashBinnacleMidY - h * 0.003 + offsetY,
+          isPortrait ? w * 0.37 : w * 0.41,
+          dashCrestY + offsetY,
           cx,
-          h * 0.625 + offsetY
+          dashCrestY + offsetY
         );
         ctx.bezierCurveTo(
-          w * 0.59,
-          h * 0.625 + offsetY,
-          w * 0.62,
-          h * 0.665 + offsetY,
-          w * 0.675,
-          h * 0.668 + offsetY
+          isPortrait ? w * 0.63 : w * 0.59,
+          dashCrestY + offsetY,
+          isPortrait ? w * 0.68 : w * 0.62,
+          dashBinnacleMidY - h * 0.003 + offsetY,
+          binnacleShoulderR,
+          dashBinnacleMidY + offsetY
         );
-        ctx.quadraticCurveTo(w * 0.78, h * 0.67 + offsetY, w - pillarInnerBotX, dashShoulderY + offsetY);
+        ctx.quadraticCurveTo(w * 0.81, dashBinnacleMidY + offsetY, w - pillarInnerBotX, dashShoulderY + offsetY);
         ctx.lineTo(w, dashCornerY + offsetY);
       };
 
@@ -1491,13 +1581,27 @@ export function ScreensaverVisualizer({
       ctx.save();
       ctx.beginPath();
       traceDashTopContour(0);
-      ctx.lineTo(w, h * 0.716);
-      ctx.quadraticCurveTo(w * 0.82, h * 0.708, w * 0.675, h * 0.705);
-      ctx.bezierCurveTo(w * 0.6, h * 0.705, w * 0.58, h * 0.656, cx, h * 0.656);
-      ctx.bezierCurveTo(w * 0.42, h * 0.656, w * 0.4, h * 0.705, w * 0.325, h * 0.705);
-      ctx.quadraticCurveTo(w * 0.18, h * 0.708, 0, h * 0.716);
+      ctx.lineTo(w, dashPadLowerY);
+      ctx.quadraticCurveTo(w * 0.82, dashPadSideY + h * 0.003, isPortrait ? w * 0.76 : w * 0.675, dashPadSideY);
+      ctx.bezierCurveTo(
+        isPortrait ? w * 0.65 : w * 0.6,
+        dashPadSideY,
+        isPortrait ? w * 0.62 : w * 0.58,
+        dashPadCrestY,
+        cx,
+        dashPadCrestY
+      );
+      ctx.bezierCurveTo(
+        isPortrait ? w * 0.38 : w * 0.42,
+        dashPadCrestY,
+        isPortrait ? w * 0.35 : w * 0.4,
+        dashPadSideY,
+        isPortrait ? w * 0.24 : w * 0.325,
+        dashPadSideY
+      );
+      ctx.quadraticCurveTo(w * 0.18, dashPadSideY + h * 0.003, 0, dashPadLowerY);
       ctx.closePath();
-      const padGrad = ctx.createLinearGradient(0, h * 0.625, 0, h * 0.72);
+      const padGrad = ctx.createLinearGradient(0, dashCrestY, 0, dashPadLowerY + h * 0.005);
       padGrad.addColorStop(0, '#161a24');
       padGrad.addColorStop(1, '#090b10');
       ctx.fillStyle = padGrad;
@@ -1513,26 +1617,27 @@ export function ScreensaverVisualizer({
 
       // Subtle lower fascia accent line + Hi-Hat A/B wing ticks embedded along dash trim
       ctx.beginPath();
-      ctx.moveTo(w * 0.025, h * 0.708);
-      ctx.quadraticCurveTo(w * 0.18, h * 0.698, w * 0.325, h * 0.696);
-      ctx.moveTo(w * 0.675, h * 0.696);
-      ctx.quadraticCurveTo(w * 0.82, h * 0.698, w * 0.975, h * 0.708);
+      ctx.moveTo(w * 0.025, dashWingY + h * 0.002);
+      ctx.quadraticCurveTo(w * 0.15, dashWingY - h * 0.006, isPortrait ? w * 0.25 : w * 0.325, dashWingY - h * 0.008);
+      ctx.moveTo(isPortrait ? w * 0.75 : w * 0.675, dashWingY - h * 0.008);
+      ctx.quadraticCurveTo(w * 0.85, dashWingY - h * 0.006, w * 0.975, dashWingY + h * 0.002);
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.07)';
       ctx.lineWidth = Math.max(1, 1.2 * scale);
       ctx.stroke();
 
       const wingSegments = 5;
+      const wingSpan = isPortrait ? 0.16 : 0.22;
       for (let i = 0; i < wingSegments; i++) {
         const t = i / (wingSegments - 1);
-        const wxL = w * (0.045 + t * 0.22);
-        const wyL = h * (0.706 - t * 0.006);
+        const wxL = w * (0.045 + t * wingSpan);
+        const wyL = dashWingY - t * h * 0.006;
         ctx.fillStyle = `rgba(56, 189, 248, ${0.1 + hatAG * (0.75 - i * 0.1)})`;
-        ctx.fillRect(wxL, wyL, 14 * scale, 2.2 * scale);
+        ctx.fillRect(wxL, wyL, (isPortrait ? 11 : 14) * scale, 2.2 * scale);
 
-        const wxR = w * (0.955 - t * 0.22) - 14 * scale;
-        const wyR = h * (0.706 - t * 0.006);
+        const wxR = w * (0.955 - t * wingSpan) - (isPortrait ? 11 : 14) * scale;
+        const wyR = dashWingY - t * h * 0.006;
         ctx.fillStyle = `rgba(125, 211, 252, ${0.1 + hatBG * (0.75 - i * 0.1)})`;
-        ctx.fillRect(wxR, wyR, 14 * scale, 2.2 * scale);
+        ctx.fillRect(wxR, wyR, (isPortrait ? 11 : 14) * scale, 2.2 * scale);
       }
 
       // Recessed Left & Right Dashboard Screen Bezels (housing the embedded GUI displays)
@@ -1556,8 +1661,18 @@ export function ScreensaverVisualizer({
         ctx.restore();
       };
 
-      drawDashScreenBezel(w * 0.032, h * 0.725, w * 0.28, h * 0.237);
-      drawDashScreenBezel(w * 0.688, h * 0.725, w * 0.28, h * 0.237);
+      drawDashScreenBezel(
+        screenLayout.left.x,
+        screenLayout.left.y,
+        screenLayout.left.w,
+        screenLayout.left.h
+      );
+      drawDashScreenBezel(
+        screenLayout.right.x,
+        screenLayout.right.y,
+        screenLayout.right.w,
+        screenLayout.right.h
+      );
 
       // 2. Solid Roof Ceiling Headliner & Slim Outer Door Border Framing Open Side Windows
       const roofGrad = ctx.createLinearGradient(0, 0, 0, roofYEdge + 8);
@@ -1640,11 +1755,15 @@ export function ScreensaverVisualizer({
       ctx.stroke();
 
       // Compact center windshield sensor housing / rearview pod anchored to solid ceiling frame
+      const podHalfTop = isPortrait ? w * 0.095 : w * 0.068;
+      const podHalfBot = isPortrait ? w * 0.072 : w * 0.052;
+      const podBotY = isPortrait ? h * 0.052 : h * 0.072;
+      const podApexY = isPortrait ? h * 0.058 : h * 0.08;
       ctx.beginPath();
-      ctx.moveTo(cx - w * 0.068, roofYMid - 0.004 * h);
-      ctx.lineTo(cx - w * 0.052, h * 0.072);
-      ctx.quadraticCurveTo(cx, h * 0.08, cx + w * 0.052, h * 0.072);
-      ctx.lineTo(cx + w * 0.068, roofYMid - 0.004 * h);
+      ctx.moveTo(cx - podHalfTop, roofYMid - 0.004 * h);
+      ctx.lineTo(cx - podHalfBot, podBotY);
+      ctx.quadraticCurveTo(cx, podApexY, cx + podHalfBot, podBotY);
+      ctx.lineTo(cx + podHalfTop, roofYMid - 0.004 * h);
       ctx.closePath();
       ctx.fillStyle = '#07090e';
       ctx.fill();
@@ -1653,8 +1772,12 @@ export function ScreensaverVisualizer({
       ctx.stroke();
 
       // Steering column shroud emerging cleanly out of the binnacle behind the wheel
+      const shroudTopY = wheelCy - wheelR * 0.18;
+      const shroudH = isPortrait
+        ? Math.max(24, screenLayout.left.y - shroudTopY - 6 * scale)
+        : h - shroudTopY + wheelR * 0.02;
       ctx.beginPath();
-      ctx.roundRect(cx - wheelR * 0.34, wheelCy - wheelR * 0.18, wheelR * 0.68, h - wheelCy + wheelR * 0.2, 8 * scale);
+      ctx.roundRect(cx - wheelR * 0.34, shroudTopY, wheelR * 0.68, shroudH, 8 * scale);
       ctx.fillStyle = '#06080d';
       ctx.fill();
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
@@ -1669,7 +1792,10 @@ export function ScreensaverVisualizer({
           if (age < 700) {
             const alpha = Math.max(0, 1 - Math.max(0, age - 450) / 250);
             const meta = HIGHWAY_TIER_META[lastHud.tier];
-            const jScale = Math.max(0.85, Math.min(2.4, h / 460));
+            const jScale = Math.max(0.85, Math.min(2.4, Math.min(w, h) / 460));
+            const labelY = isPortrait ? h * 0.588 : h * 0.65;
+            const msY = isPortrait ? h * 0.612 : h * 0.682;
+            const comboY = isPortrait ? h * 0.635 : h * 0.713;
             ctx.save();
             ctx.globalAlpha = alpha;
             ctx.textAlign = 'center';
@@ -1678,9 +1804,9 @@ export function ScreensaverVisualizer({
             ctx.font = `bold ${Math.round(13.5 * jScale)}px monospace`;
             ctx.lineWidth = Math.max(2.5, 3.2 * jScale);
             ctx.strokeStyle = 'rgba(0, 0, 0, 0.92)';
-            ctx.strokeText(meta.label, cx, h * 0.65);
+            ctx.strokeText(meta.label, cx, labelY);
             ctx.fillStyle = meta.color;
-            ctx.fillText(meta.label, cx, h * 0.65);
+            ctx.fillText(meta.label, cx, labelY);
 
             if (lastHud.offsetMs !== null) {
               const errStr =
@@ -1689,19 +1815,19 @@ export function ScreensaverVisualizer({
                   : `${lastHud.offsetMs > 0 ? '+' : ''}${lastHud.offsetMs}ms`;
               ctx.font = `bold ${Math.round(9.5 * jScale)}px monospace`;
               ctx.lineWidth = Math.max(2, 2.4 * jScale);
-              ctx.strokeText(errStr, cx, h * 0.682);
+              ctx.strokeText(errStr, cx, msY);
               ctx.fillStyle =
                 lastHud.offsetMs < 0 ? '#7dd3fc' : lastHud.offsetMs > 0 ? '#fcd34d' : '#ffffff';
-              ctx.fillText(errStr, cx, h * 0.682);
+              ctx.fillText(errStr, cx, msY);
             }
 
             if (lastHud.combo >= 2) {
               const comboText = `${lastHud.combo} COMBO`;
               ctx.font = `bold ${Math.round(11 * jScale)}px monospace`;
               ctx.lineWidth = Math.max(2, 2.8 * jScale);
-              ctx.strokeText(comboText, cx, h * 0.713);
+              ctx.strokeText(comboText, cx, comboY);
               ctx.fillStyle = '#ffffff';
-              ctx.fillText(comboText, cx, h * 0.713);
+              ctx.fillText(comboText, cx, comboY);
             }
             ctx.restore();
           }
@@ -1921,16 +2047,18 @@ export function ScreensaverVisualizer({
     ) => {
       const pMeta = PERSONA_META[curDiff] || {
         name: getPersonaForDifficulty(curDiff),
+        diffLabel: curDiff.charAt(0).toUpperCase() + curDiff.slice(1),
         textClass: 'text-emerald-300',
         accentHex: '#34d399',
       };
-      const fs = Math.min(w / 700, h / 438) * 16;
+      const screenLayout = getCockpitScreenLayout(w, h);
+      const fs = Math.min(screenLayout.left.w / 196, screenLayout.left.h / 104) * 16;
 
       // Left Dashboard Telemetry Screen
-      const lx = w * 0.032;
-      const ly = h * 0.725;
-      const lw = w * 0.28;
-      const lh = h * 0.237;
+      const lx = screenLayout.left.x;
+      const ly = screenLayout.left.y;
+      const lw = screenLayout.left.w;
+      const lh = screenLayout.left.h;
       const lpx = fs * 0.625;
       const lpy = fs * 0.5;
       const barNum = Math.max(1, target.meter.barIndex + 1);
@@ -1945,33 +2073,32 @@ export function ScreensaverVisualizer({
 
       ctx.save();
       if (showInputHighwayRef.current && curScore) {
-        // Replace Left Dashboard with DemoTest / PlayTest Score when input highway is active
+        // Row 1: Demotest/Playtest Score + Current Difficulty
         const isDemo = curSimMode === 'demo';
-        ctx.font = `700 ${Math.round(fs * 0.66)}px monospace`;
+        ctx.font = `700 ${Math.round(fs * 0.55)}px monospace`;
         ctx.textBaseline = 'top';
         ctx.textAlign = 'left';
         ctx.fillStyle = isDemo ? '#6ee7b7' : '#d1d5db';
-        ctx.fillText(isDemo ? 'DEMOTEST SCORE' : 'PLAYTEST SCORE', lx + lpx, ly + lpy);
+        ctx.fillText(isDemo ? 'Demotest Score' : 'Playtest Score', lx + lpx, ly + lpy);
 
         ctx.textAlign = 'right';
-        ctx.fillStyle = '#34d399';
-        ctx.fillText(`${curScore.accuracy.toFixed(1)}%`, lx + lw - lpx, ly + lpy);
+        ctx.fillStyle = pMeta.accentHex;
+        ctx.fillText(`${pMeta.diffLabel} Difficulty`, lx + lw - lpx, ly + lpy);
 
-        // Middle Combo / Max / Bar parity row
+        // Row 2: Accu % / Combo / Max (Bar A/B omitted during game)
         const midY = ly + lpy + fs * 1.15;
-        ctx.font = `700 ${Math.round(fs * 0.68)}px monospace`;
+        ctx.font = `700 ${Math.round(fs * 0.58)}px monospace`;
         ctx.textAlign = 'left';
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(`COMBO ${curScore.combo}`, lx + lpx, midY);
+        ctx.fillStyle = '#34d399';
+        ctx.fillText(`Accu ${curScore.accuracy.toFixed(1)}%`, lx + lpx, midY);
 
         ctx.textAlign = 'center';
-        ctx.fillStyle = '#fcd34d';
-        ctx.fillText(`MAX ${curScore.maxCombo}`, lx + lw * 0.56, midY);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(`Combo ${curScore.combo}`, lx + lw * 0.6, midY);
 
-        ctx.font = `500 ${Math.round(fs * 0.6)}px monospace`;
         ctx.textAlign = 'right';
-        ctx.fillStyle = '#6b7280';
-        ctx.fillText(`BAR ${target.step.barParity}`, lx + lw - lpx, midY + fs * 0.05);
+        ctx.fillStyle = '#fcd34d';
+        ctx.fillText(`Max ${curScore.maxCombo}`, lx + lw - lpx, midY);
 
         // Bottom 2x3 Judgement Counts Grid
         const countsGridTop = ly + lh - lpy - fs * 1.9;
@@ -2055,10 +2182,10 @@ export function ScreensaverVisualizer({
       }
 
       // Right Dashboard Infotainment Bay
-      const rx = w * 0.688;
-      const ry = h * 0.725;
-      const rw = w * 0.28;
-      const rh = h * 0.237;
+      const rx = screenLayout.right.x;
+      const ry = screenLayout.right.y;
+      const rw = screenLayout.right.w;
+      const rh = screenLayout.right.h;
       const rpx = fs * 0.625;
       const rpy = fs * 0.5;
       const iconColW = fs * 1.65;
@@ -2084,23 +2211,29 @@ export function ScreensaverVisualizer({
         ctx.fillText(`${p.keyNum} ${p.label}`, px + fs * 0.35, py + tileH * 0.5);
       });
 
-      // Demo 720p badge on right column
+      // Active simulation mode & resolution badge on right column
       const badgeX = rx + rw - rpx - iconColW;
       ctx.beginPath();
       ctx.roundRect(badgeX, ry + rpy, iconColW, tileH, fs * 0.2);
-      ctx.fillStyle = 'rgba(16, 185, 129, 0.18)';
+      ctx.fillStyle =
+        curSimMode === 'demo'
+          ? 'rgba(16, 185, 129, 0.18)'
+          : curSimMode === 'input'
+          ? 'rgba(244, 63, 94, 0.2)'
+          : 'rgba(56, 189, 248, 0.18)';
       ctx.fill();
       ctx.textAlign = 'center';
       ctx.font = `700 ${Math.round(fs * 0.52)}px monospace`;
-      ctx.fillStyle = '#6ee7b7';
-      ctx.fillText('DEMO', badgeX + iconColW * 0.5, ry + rpy + tileH * 0.5);
+      ctx.fillStyle =
+        curSimMode === 'demo' ? '#6ee7b7' : curSimMode === 'input' ? '#fda4af' : '#7dd3fc';
+      ctx.fillText(curSimMode.toUpperCase(), badgeX + iconColW * 0.5, ry + rpy + tileH * 0.5);
 
       ctx.beginPath();
       ctx.roundRect(badgeX, ry + rpy + tileH + pGap, iconColW, tileH, fs * 0.2);
       ctx.fillStyle = showInputHighwayRef.current ? '#10b981' : 'rgba(255, 255, 255, 0.04)';
       ctx.fill();
       ctx.fillStyle = showInputHighwayRef.current ? '#030712' : '#9ca3af';
-      ctx.fillText(`${h}p`, badgeX + iconColW * 0.5, ry + rpy + tileH + pGap + tileH * 0.5);
+      ctx.fillText(`${Math.min(w, h)}p`, badgeX + iconColW * 0.5, ry + rpy + tileH + pGap + tileH * 0.5);
 
       // Bottom K / S / T Impulse Meters
       const stripTop = ry + rh - rpy - fs * 0.9;
@@ -2213,6 +2346,45 @@ export function ScreensaverVisualizer({
       });
 
       motionState = stepWheelMotionState(motionState, target, dtSec);
+
+      // Auto-switch preset cleanly when crossing into a section with an assigned preset (or seeking/looping)
+      const beatFloatNow = target.meter.beatFloat;
+      const prevBeat = prevAutoBeatRef.current;
+      prevAutoBeatRef.current = beatFloatNow;
+      const didJumpOrLoop = prevBeat !== null && Math.abs(beatFloatNow - prevBeat) > 0.35;
+      if (didJumpOrLoop) {
+        lastAutoSectionKeyRef.current = null;
+      }
+
+      const curSortedSections = propsRef.current.sortedSections;
+      let activeSection: Section | null = null;
+      if (curSortedSections.length > 0) {
+        if (beatFloatNow < curSortedSections[0].beat - 1e-4) {
+          if (curSortedSections[0].beat <= 0 && beatFloatNow >= -4) {
+            activeSection = curSortedSections[0];
+          }
+        } else {
+          for (let si = curSortedSections.length - 1; si >= 0; si--) {
+            if (curSortedSections[si].beat <= beatFloatNow + 1e-4) {
+              activeSection = curSortedSections[si];
+              break;
+            }
+          }
+        }
+      }
+
+      if ((playingNow || didJumpOrLoop) && activeSection) {
+        const secKey = `${activeSection.id}:${activeSection.preset ?? ''}`;
+        if (lastAutoSectionKeyRef.current !== secKey) {
+          lastAutoSectionKeyRef.current = secKey;
+          if (activeSection.preset && activeSection.preset !== presetRef.current) {
+            presetRef.current = activeSection.preset;
+            setPreset(activeSection.preset);
+          }
+        }
+      } else if (!activeSection) {
+        lastAutoSectionKeyRef.current = null;
+      }
 
       const activePreset = presetRef.current;
       const w = bgCanvas.width;
@@ -2351,9 +2523,9 @@ export function ScreensaverVisualizer({
         showInputHighwayRef.current
       );
 
-      // Composite configured WxH WebM frame (WebGL + 2D overlay + Cockpit + Dashboard Screens) when exporting Demo
+      // Composite configured WxH WebM frame (WebGL + 2D overlay + Cockpit + Dashboard Screens) once recording starts
       const exportSess = exportSessionRef.current;
-      if (exportSess?.active) {
+      if (exportSess?.active && !exportSess.armed) {
         if (exportSess.clearTerrainOnStart) {
           terrainHistory.length = 0;
           liveColValues.fill(0);
@@ -2466,12 +2638,17 @@ export function ScreensaverVisualizer({
       const sess = exportSessionRef.current;
       if (sess?.active) {
         sess.cancelled = true;
+        sess.armed = false;
         if (sess.finishTimerId !== null) {
           window.clearTimeout(sess.finishTimerId);
           sess.finishTimerId = null;
         }
         if (sess.recorder && sess.recorder.state !== 'inactive') {
           sess.recorder.stop();
+        } else {
+          sess.active = false;
+          exportSessionRef.current = null;
+          engine.setLoop(sess.prevLoop);
         }
       }
       bgCanvas.removeEventListener('webglcontextlost', handleContextLost);
@@ -2486,7 +2663,7 @@ export function ScreensaverVisualizer({
     };
   }, []);
 
-  // Wire imperative configurable WxH Demo WebM export handle (default 1280x720)
+  // Wire imperative configurable WxH WebM export handle (preserves active mode + waits for Space to begin)
   useEffect(() => {
     const nextFrame = () =>
       new Promise<void>((resolve) => {
@@ -2496,10 +2673,8 @@ export function ScreensaverVisualizer({
     const handle: ScreensaverExportHandle = {
       startDemoWebmExport: async (options) => {
         const {
-          simSoundMode: startMode,
           songDurationSec: propDur,
-          fileName: trackName,
-          onChangeSimSoundMode: setMode,
+          sortedSections: curSorted,
           onBeforeDemoExportStart: beforeStart,
           onWebmExportStateChange: setState,
           exportWidth: curExportW,
@@ -2543,160 +2718,214 @@ export function ScreensaverVisualizer({
         expCanvas.height = exportH;
 
         const prevLoop = engine.getLoop();
-        const prevMode = startMode;
         const buf = engine.getBuffer();
         const exportDuration =
           buf && buf.duration > 0 ? buf.duration : Math.max(1, propDur || engine.getDuration());
-        const baseName = (trackName || 'screensaver')
-          .replace(/\.[^/.]+$/, '')
-          .replace(/[^a-zA-Z0-9._-]+/g, '_');
-        const outFileName = `${baseName}_demo_${exportW}x${exportH}.webm`;
 
+        // Prepare playback at 0:00 and keep the user's current simulation mode (Demo / Sync / Input) intact
         engine.pause();
         engine.setLoop(false);
         engine.seek(0);
         beforeStart?.();
-        if (prevMode !== 'demo') {
-          setMode?.('demo');
+
+        // Reset section auto-switch tracker and preview initial beat-0 section preset if configured
+        lastAutoSectionKeyRef.current = null;
+        prevAutoBeatRef.current = null;
+        if (curSorted.length > 0 && curSorted[0].beat <= 0 && curSorted[0].preset) {
+          lastAutoSectionKeyRef.current = `${curSorted[0].id}:${curSorted[0].preset}`;
+          if (curSorted[0].preset !== presetRef.current) {
+            presetRef.current = curSorted[0].preset;
+            setPreset(curSorted[0].preset);
+          }
+        }
+
+        // Blur clicked export button so Spacebar cleanly starts capture rather than clicking a button
+        const activeEl = document.activeElement as HTMLElement | null;
+        if (activeEl && activeEl !== document.body && typeof activeEl.blur === 'function') {
+          activeEl.blur();
         }
 
         const chunks: Blob[] = [];
-        const session = {
+        const session: NonNullable<typeof exportSessionRef.current> = {
           active: true,
+          armed: true,
           finishing: false,
           cancelled: false,
-          recorder: null as MediaRecorder | null,
-          videoStream: null as MediaStream | null,
+          recorder: null,
+          videoStream: null,
           chunks,
           mimeType: supportedMime,
           prevLoop,
-          prevMode,
           durationSec: exportDuration,
           width: exportW,
           height: exportH,
-          outFileName,
+          outFileName: '',
           startedPlaybackAtMs: 0,
           lastProgressUiMs: 0,
-          finishTimerId: null as number | null,
+          finishTimerId: null,
           clearTerrainOnStart: true,
         };
+
+        session.beginCaptureFn = async () => {
+          if (!session.active || !session.armed || session.cancelled) return;
+          session.armed = false;
+          setIsArmedToRecord(false);
+
+          const {
+            simSoundMode: activeMode,
+            fileName: trackName,
+            sortedSections: latestSorted,
+            onBeforeDemoExportStart: onBeginReset,
+            onWebmExportStateChange: onExportState,
+          } = propsRef.current;
+
+          const baseName = (trackName || 'screensaver')
+            .replace(/\.[^/.]+$/, '')
+            .replace(/[^a-zA-Z0-9._-]+/g, '_');
+          session.outFileName = `${baseName}_${activeMode}_${exportW}x${exportH}.webm`;
+
+          engine.pause();
+          engine.setLoop(false);
+          engine.seek(0);
+          onBeginReset?.();
+          session.clearTerrainOnStart = true;
+
+          lastAutoSectionKeyRef.current = null;
+          prevAutoBeatRef.current = null;
+          if (latestSorted.length > 0 && latestSorted[0].beat <= 0 && latestSorted[0].preset) {
+            lastAutoSectionKeyRef.current = `${latestSorted[0].id}:${latestSorted[0].preset}`;
+            if (latestSorted[0].preset !== presetRef.current) {
+              presetRef.current = latestSorted[0].preset;
+              setPreset(latestSorted[0].preset);
+            }
+          }
+
+          onExportState?.({
+            status: 'recording',
+            elapsedSec: 0,
+            durationSec: exportDuration,
+            error: null,
+            lastFileName: null,
+          });
+
+          // Render 2 clean initial frames at target resolution before starting recorder
+          await nextFrame();
+          await nextFrame();
+
+          if (!exportSessionRef.current || exportSessionRef.current !== session || session.cancelled) {
+            return;
+          }
+
+          const audioStream = engine.getCaptureAudioStream();
+          const videoStream = expCanvas!.captureStream(60);
+          session.videoStream = videoStream;
+
+          const tracks: MediaStreamTrack[] = [...videoStream.getVideoTracks()];
+          if (audioStream) {
+            tracks.push(...audioStream.getAudioTracks());
+          }
+          const combinedStream = new MediaStream(tracks);
+
+          const targetVideoBitrate = Math.max(
+            4_000_000,
+            Math.min(18_000_000, Math.round(((exportW * exportH) / (1280 * 720)) * 7_500_000))
+          );
+
+          let recorder: MediaRecorder;
+          try {
+            recorder = new MediaRecorder(combinedStream, {
+              mimeType: supportedMime,
+              videoBitsPerSecond: targetVideoBitrate,
+              audioBitsPerSecond: 192_000,
+            });
+          } catch {
+            try {
+              recorder = new MediaRecorder(combinedStream, { mimeType: supportedMime });
+            } catch {
+              recorder = new MediaRecorder(combinedStream);
+            }
+          }
+          session.recorder = recorder;
+
+          recorder.ondataavailable = (ev) => {
+            if (ev.data && ev.data.size > 0) {
+              session.chunks.push(ev.data);
+            }
+          };
+
+          recorder.onstop = () => {
+            if (session.finishTimerId !== null) {
+              window.clearTimeout(session.finishTimerId);
+              session.finishTimerId = null;
+            }
+            session.videoStream?.getVideoTracks().forEach((t) => t.stop());
+            session.active = false;
+            session.armed = false;
+            if (exportSessionRef.current === session) {
+              exportSessionRef.current = null;
+            }
+            setIsArmedToRecord(false);
+            setActiveExportSize(null);
+
+            engine.pause();
+            engine.setLoop(session.prevLoop);
+
+            if (!session.cancelled && session.chunks.length > 0) {
+              const blob = new Blob(session.chunks, {
+                type: recorder.mimeType || session.mimeType || 'video/webm',
+              });
+              triggerBlobDownload(blob, session.outFileName);
+              propsRef.current.onWebmExportStateChange?.({
+                status: 'idle',
+                elapsedSec: 0,
+                durationSec: session.durationSec,
+                error: null,
+                lastFileName: session.outFileName,
+              });
+            } else {
+              propsRef.current.onWebmExportStateChange?.({
+                status: 'idle',
+                elapsedSec: 0,
+                durationSec: 0,
+                error: null,
+                lastFileName: null,
+              });
+            }
+          };
+
+          recorder.onerror = () => {
+            session.cancelled = true;
+            propsRef.current.onWebmExportStateChange?.({
+              status: 'idle',
+              elapsedSec: 0,
+              durationSec: 0,
+              error: 'WebM encoding failed during capture.',
+              lastFileName: null,
+            });
+            if (recorder.state !== 'inactive') {
+              recorder.stop();
+            }
+          };
+
+          recorder.start(250);
+          session.startedPlaybackAtMs = performance.now();
+          engine.play();
+        };
+
         exportSessionRef.current = session;
         setActiveExportSize({ width: exportW, height: exportH });
+        setIsArmedToRecord(true);
         setState?.({
-          status: 'recording',
+          status: 'armed',
           elapsedSec: 0,
           durationSec: exportDuration,
           error: null,
           lastFileName: null,
         });
-
-        // Allow React to commit Demo triggers & render 2 frames at target resolution before starting recorder
-        await nextFrame();
-        await nextFrame();
-
-        if (!exportSessionRef.current || exportSessionRef.current.cancelled) {
-          return;
-        }
-
-        const audioStream = engine.getCaptureAudioStream();
-        const videoStream = expCanvas.captureStream(60);
-        session.videoStream = videoStream;
-
-        const tracks: MediaStreamTrack[] = [...videoStream.getVideoTracks()];
-        if (audioStream) {
-          tracks.push(...audioStream.getAudioTracks());
-        }
-        const combinedStream = new MediaStream(tracks);
-
-        const targetVideoBitrate = Math.max(
-          4_000_000,
-          Math.min(18_000_000, Math.round(((exportW * exportH) / (1280 * 720)) * 7_500_000))
-        );
-
-        let recorder: MediaRecorder;
-        try {
-          recorder = new MediaRecorder(combinedStream, {
-            mimeType: supportedMime,
-            videoBitsPerSecond: targetVideoBitrate,
-            audioBitsPerSecond: 192_000,
-          });
-        } catch {
-          try {
-            recorder = new MediaRecorder(combinedStream, { mimeType: supportedMime });
-          } catch {
-            recorder = new MediaRecorder(combinedStream);
-          }
-        }
-        session.recorder = recorder;
-
-        recorder.ondataavailable = (ev) => {
-          if (ev.data && ev.data.size > 0) {
-            session.chunks.push(ev.data);
-          }
-        };
-
-        recorder.onstop = () => {
-          if (session.finishTimerId !== null) {
-            window.clearTimeout(session.finishTimerId);
-            session.finishTimerId = null;
-          }
-          session.videoStream?.getVideoTracks().forEach((t) => t.stop());
-          session.active = false;
-          if (exportSessionRef.current === session) {
-            exportSessionRef.current = null;
-          }
-          setActiveExportSize(null);
-
-          engine.pause();
-          engine.setLoop(session.prevLoop);
-          if (session.prevMode !== 'demo') {
-            propsRef.current.onChangeSimSoundMode?.(session.prevMode);
-          }
-
-          if (!session.cancelled && session.chunks.length > 0) {
-            const blob = new Blob(session.chunks, {
-              type: recorder.mimeType || session.mimeType || 'video/webm',
-            });
-            triggerBlobDownload(blob, session.outFileName);
-            propsRef.current.onWebmExportStateChange?.({
-              status: 'idle',
-              elapsedSec: 0,
-              durationSec: session.durationSec,
-              error: null,
-              lastFileName: session.outFileName,
-            });
-          } else {
-            propsRef.current.onWebmExportStateChange?.({
-              status: 'idle',
-              elapsedSec: 0,
-              durationSec: 0,
-              error: null,
-              lastFileName: null,
-            });
-          }
-        };
-
-        recorder.onerror = () => {
-          session.cancelled = true;
-          propsRef.current.onWebmExportStateChange?.({
-            status: 'idle',
-            elapsedSec: 0,
-            durationSec: 0,
-            error: 'WebM encoding failed during capture.',
-            lastFileName: null,
-          });
-          if (recorder.state !== 'inactive') {
-            recorder.stop();
-          }
-        };
-
-        recorder.start(250);
-        session.startedPlaybackAtMs = performance.now();
-        engine.play();
       },
       stopAndSaveDemoWebmExport: () => {
         const sess = exportSessionRef.current;
-        if (!sess || !sess.active) return;
+        if (!sess || !sess.active || sess.armed) return;
         sess.finishing = true;
         if (sess.finishTimerId !== null) {
           window.clearTimeout(sess.finishTimerId);
@@ -2718,6 +2947,7 @@ export function ScreensaverVisualizer({
         if (!sess || !sess.active) return;
         sess.cancelled = true;
         sess.finishing = true;
+        sess.armed = false;
         if (sess.finishTimerId !== null) {
           window.clearTimeout(sess.finishTimerId);
           sess.finishTimerId = null;
@@ -2727,12 +2957,10 @@ export function ScreensaverVisualizer({
         } else {
           sess.active = false;
           exportSessionRef.current = null;
+          setIsArmedToRecord(false);
           setActiveExportSize(null);
           engine.pause();
           engine.setLoop(sess.prevLoop);
-          if (sess.prevMode !== 'demo') {
-            propsRef.current.onChangeSimSoundMode?.(sess.prevMode);
-          }
           propsRef.current.onWebmExportStateChange?.({
             status: 'idle',
             elapsedSec: 0,
@@ -2756,25 +2984,34 @@ export function ScreensaverVisualizer({
 
   const personaMeta = PERSONA_META[difficulty] || {
     name: getPersonaForDifficulty(difficulty),
+    diffLabel: difficulty.charAt(0).toUpperCase() + difficulty.slice(1),
     textClass: 'text-emerald-300',
     accentHex: '#34d399',
   };
+
+  const targetPreviewSize =
+    activeExportSize ?? (exportHeight > exportWidth * 1.05 ? { width: exportWidth, height: exportHeight } : null);
+  const isPortraitPreview = Boolean(
+    !isFullscreen && targetPreviewSize && targetPreviewSize.height > targetPreviewSize.width * 1.05
+  );
 
   return (
     <div
       ref={containerRef}
       style={
-        !isFullscreen && activeExportSize
-          ? { aspectRatio: `${activeExportSize.width} / ${activeExportSize.height}` }
+        !isFullscreen && targetPreviewSize
+          ? { aspectRatio: `${targetPreviewSize.width} / ${targetPreviewSize.height}` }
           : undefined
       }
       className={cn(
-        'relative w-full overflow-hidden bg-[#04060b] select-none',
+        'relative overflow-hidden bg-[#04060b] select-none',
         isFullscreen
           ? 'h-screen w-screen'
+          : isPortraitPreview
+          ? 'h-[min(74vh,640px)] max-w-full mx-auto'
           : activeExportSize
-          ? 'min-h-[420px]'
-          : 'aspect-[16/10] min-h-[420px]'
+          ? 'w-full min-h-[420px]'
+          : 'w-full aspect-[16/10] min-h-[420px]'
       )}
     >
       {/* Layer 1: WebGL Procedural Windshield Canvas (GLSL Space / Wormhole / MilkDrop) */}
@@ -2809,32 +3046,52 @@ export function ScreensaverVisualizer({
         className="absolute inset-0 w-full h-full block pointer-events-none"
       />
 
+      {/* Armed WebM Recording Gate Prompt (only in DOM before capture starts) */}
+      {isArmedToRecord && (
+        <div className="pointer-events-none absolute inset-x-0 top-[20%] z-20 flex flex-col items-center justify-center px-4 text-center">
+          <div className="px-4 py-2 rounded-sm bg-black/75 border border-emerald-400/45 shadow-lg">
+            <div className="text-sm font-mono font-bold tracking-wider uppercase text-emerald-300">
+              Press space to begin
+            </div>
+            <div className="mt-0.5 text-xs font-mono text-gray-300">
+              Mode: {simSoundMode.toUpperCase()}
+              {activeExportSize ? ` · ${activeExportSize.width}×${activeExportSize.height}` : ''}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Embedded Dashboard Displays (all GUI inside solid car dashboard, keeping windshield unobstructed) */}
       {/* Left Dashboard Telemetry Cluster: DemoTest/PlayTest Score when Input Highway ON, else Step Meter + Bar A/B */}
       <div
         style={{ fontSize: 'var(--dash-fs, 16px)' }}
-        className="pointer-events-none absolute left-[3.2%] right-[68.8%] top-[72.5%] bottom-[3.8%] z-10 flex flex-col justify-between px-[0.625em] py-[0.45em] font-mono tabular-nums overflow-hidden"
+        className={cn(
+          'pointer-events-none absolute z-10 flex flex-col justify-between px-[0.625em] py-[0.45em] font-mono tabular-nums overflow-hidden',
+          isPortraitView
+            ? 'left-[3.2%] right-[51.4%] top-[85.8%] bottom-[2.4%]'
+            : 'left-[3.2%] right-[68.8%] top-[72.5%] bottom-[3.8%]'
+        )}
       >
         {showInputHighway && playScore ? (
           <>
-            <div className="flex items-center justify-between gap-[0.25em] text-[0.65em] leading-none">
+            <div className="flex items-center justify-between gap-[0.2em] text-[0.55em] leading-none">
               <span
                 className={cn(
-                  'font-semibold uppercase tracking-wider truncate',
+                  'font-semibold tracking-tight truncate',
                   simSoundMode === 'demo' ? 'text-emerald-300' : 'text-gray-200'
                 )}
               >
                 {simSoundMode === 'demo' ? 'Demotest Score' : 'Playtest Score'}
               </span>
-              <span className="font-bold text-emerald-400 shrink-0">
-                {playScore.accuracy.toFixed(1)}%
+              <span className={cn('font-semibold shrink-0', personaMeta.textClass)}>
+                {personaMeta.diffLabel} Difficulty
               </span>
             </div>
 
-            <div className="flex items-center justify-between gap-[0.25em] text-[0.65em] leading-none">
-              <span className="text-white font-bold">COMBO {playScore.combo}</span>
-              <span className="text-amber-300 font-bold">MAX {playScore.maxCombo}</span>
-              <span className="text-[0.9em] text-gray-500 uppercase">Bar {hudReadout.barParity}</span>
+            <div className="flex items-center justify-between gap-[0.2em] text-[0.58em] leading-none">
+              <span className="text-emerald-400 font-bold">Accu {playScore.accuracy.toFixed(1)}%</span>
+              <span className="text-white font-bold">Combo {playScore.combo}</span>
+              <span className="text-amber-300 font-bold">Max {playScore.maxCombo}</span>
             </div>
 
             <div className="grid grid-cols-3 gap-x-[0.4em] gap-y-[0.15em] text-[0.58em] leading-tight">
@@ -2923,7 +3180,12 @@ export function ScreensaverVisualizer({
       {/* Right Dashboard Infotainment Bay: Windshield Preset Switcher, Fullscreen & Drum Perturbations */}
       <div
         style={{ fontSize: 'var(--dash-fs, 16px)' }}
-        className="pointer-events-auto absolute left-[68.8%] right-[3.2%] top-[72.5%] bottom-[3.8%] z-10 flex flex-col justify-between px-[0.625em] py-[0.5em] font-mono tabular-nums overflow-hidden"
+        className={cn(
+          'pointer-events-auto absolute z-10 flex flex-col justify-between px-[0.625em] py-[0.5em] font-mono tabular-nums overflow-hidden',
+          isPortraitView
+            ? 'left-[51.4%] right-[3.2%] top-[85.8%] bottom-[2.4%]'
+            : 'left-[68.8%] right-[3.2%] top-[72.5%] bottom-[3.8%]'
+        )}
       >
         <div className="flex items-start justify-between gap-[0.375em]">
           <div className="grid grid-cols-2 gap-[0.25em] flex-1 min-w-0">

@@ -133,11 +133,14 @@ export type DifficultyDensityMatrix = Record<
   Record<ChartDifficulty, DifficultyCellRule>
 >;
 
+export type WindshieldPreset = 'glsl-space' | 'wormhole' | 'music-rain' | 'milkdrop';
+
 export interface Section {
   id: string;
   beat: number;
   label: string;
   density: SectionDensity;
+  preset?: WindshieldPreset;
 }
 
 export type SimSoundMode = 'demo' | 'sync' | 'input';
